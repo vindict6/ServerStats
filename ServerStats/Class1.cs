@@ -82,8 +82,8 @@ namespace ServerStats
         private bool _wasWarmup = false;
         private string _lastMap = "";
 
-        public override string ModuleName => "PlayerStatsEventTracker";
-        public override string ModuleVersion => "3.8.0"; // Version Bump for Split Paths
+        public override string ModuleName => "ServerStats";
+        public override string ModuleVersion => "3.8.0";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
