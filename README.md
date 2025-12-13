@@ -1,4 +1,4 @@
-This plugin outputs all major match and server data through rcon command css_players
+This CS2 plugin outputs all major match and server data through rcon command css_players
 
 Run the plugin once to generate default configs. The plugin will re-read from workshop.ini if it is changed while the
 server is already running.
