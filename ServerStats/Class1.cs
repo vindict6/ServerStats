@@ -1,4 +1,4 @@
-﻿// ServerStats.cs
+// ServerStats.cs
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -83,7 +83,7 @@ namespace ServerStats
         private string _lastMap = "";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "3.8.0";
+        public override string ModuleVersion => "3.9.0"; // Version Bump for Auto-Gen Configs
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -202,10 +202,23 @@ namespace ServerStats
         {
             try
             {
+                // Ensure directory exists first
+                if (!Directory.Exists(ServerStatsConfigDir)) Directory.CreateDirectory(ServerStatsConfigDir);
+
                 if (!File.Exists(GeneralConfigPath))
                 {
-                    File.WriteAllText(GeneralConfigPath, "UsesMatchLibrarian=true");
+                    // Generate Default config.ini with provided content
+                    string defaultConfig = @"// ServerStats General Configuration
+// -----------------------------------------------------------
+
+// Enables or Disables the Match Librarian database functionality.
+// true  = Matches will be saved to JSON files in the /configs/plugins/MatchLibrarian/matches folder.
+// false = Live stats (css_players) will work, but nothing is saved to disk.
+UsesMatchLibrarian=true";
+
+                    File.WriteAllText(GeneralConfigPath, defaultConfig);
                     _usesMatchLibrarian = true;
+                    Console.WriteLine("[PlayerStats] Created default config.ini.");
                     return;
                 }
 
@@ -244,11 +257,25 @@ namespace ServerStats
 
             try
             {
+                // Ensure directory exists first
+                if (!Directory.Exists(ServerStatsConfigDir)) Directory.CreateDirectory(ServerStatsConfigDir);
+
                 if (!File.Exists(WorkshopIniPath))
                 {
-                    _loadLog.Add("Error: workshop.ini not found.");
-                    Console.WriteLine($"[PlayerStats] Error: workshop.ini not found at {WorkshopIniPath}");
-                    return;
+                    // Generate Default workshop.ini with provided content
+                    string defaultWorkshop = @"// format: key = value
+// 1. Collection ID for output
+collection_id=3461157618
+
+// 1. Map Name to Workshop ID Mappings
+// These allows websites to externally fetch the correct workshop image for the map
+de_zoo=3101352333
+de_jingshen_d=3250391658
+de_iris=1591780701";
+
+                    File.WriteAllText(WorkshopIniPath, defaultWorkshop);
+                    _loadLog.Add("Created default workshop.ini.");
+                    Console.WriteLine("[PlayerStats] Created default workshop.ini.");
                 }
 
                 string[] lines = File.ReadAllLines(WorkshopIniPath);
