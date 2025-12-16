@@ -1,11 +1,14 @@
-// ServerStats.cs
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
@@ -19,8 +22,6 @@ namespace ServerStats
     [MinimumApiVersion(80)]
     public class PlayerStatsEventTracker : BasePlugin
     {
-        // --- Data Structures for the Database ---
-
         public class MatchDatabase
         {
             public string MatchID { get; set; } = "";
@@ -29,61 +30,162 @@ namespace ServerStats
             public string CollectionID { get; set; } = "";
             public DateTime StartTime { get; set; }
             public DateTime LastUpdated { get; set; }
+            public bool MatchComplete { get; set; }
+
             public int CTWins { get; set; }
             public int TWins { get; set; }
+            public int TotalRounds { get; set; }
+
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> CTScoreHistory { get; set; } = new();
+
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> TScoreHistory { get; set; } = new();
+
+            [JsonIgnore]
             public bool IsWarmup { get; set; }
+
             public List<PlayerMatchData> Players { get; set; } = new();
+
+            public List<CombatLog> KillFeed { get; set; } = new();
+            public List<ObjectiveLog> EventFeed { get; set; } = new();
+            public List<ChatLog> ChatFeed { get; set; } = new();
         }
 
         public class PlayerMatchData
         {
             public ulong SteamID { get; set; }
             public string Name { get; set; } = "Unknown";
-            public int TeamNum { get; set; } // 1=Spec, 2=T, 3=CT
             public bool IsBot { get; set; }
 
-            // Cumulative Stats
-            public int Kills { get; set; }
-            public int Deaths { get; set; }
-            public int Assists { get; set; }
-            public int ZeusKills { get; set; }
+            [JsonPropertyName("Team")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> TeamHistory { get; set; } = new();
 
-            // Snapshot Stats (Latest known state)
-            public int MVPs { get; set; }
-            public int Score { get; set; }
-            public int Money { get; set; }
-            public bool IsAlive { get; set; }
-            public int Ping { get; set; }
-            public string Inventory { get; set; } = "";
+            [JsonPropertyName("Kills")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> KillsHistory { get; set; } = new();
+
+            [JsonPropertyName("Deaths")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> DeathsHistory { get; set; } = new();
+
+            [JsonPropertyName("Assists")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> AssistsHistory { get; set; } = new();
+
+            [JsonPropertyName("ZeusKills")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> ZeusKillsHistory { get; set; } = new();
+
+            [JsonPropertyName("MVPs")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> MVPsHistory { get; set; } = new();
+
+            [JsonPropertyName("Score")]
+            [JsonConverter(typeof(InlineListConverter<int>))]
+            public List<int> ScoreHistory { get; set; } = new();
+
+            [JsonPropertyName("Alive")]
+            [JsonConverter(typeof(InlineListConverter<bool>))]
+            public List<bool> AliveHistory { get; set; } = new();
+
+            [JsonPropertyName("Inventory")]
+            [JsonConverter(typeof(InlineListConverter<string>))]
+            public List<string> InventoryHistory { get; set; } = new();
+
+            [JsonIgnore] public int CurrentTeam { get; set; }
+            [JsonIgnore] public int CurrentKills { get; set; }
+            [JsonIgnore] public int CurrentDeaths { get; set; }
+            [JsonIgnore] public int CurrentAssists { get; set; }
+            [JsonIgnore] public int CurrentZeusKills { get; set; }
+            [JsonIgnore] public int CurrentMVPs { get; set; }
+            [JsonIgnore] public int CurrentScore { get; set; }
         }
 
-        // We use SteamID (ulong) as key to persist stats if player reconnects
+        public class CombatLog
+        {
+            public int Round { get; set; }
+            public string Type { get; set; } = "Unknown";
+            public string PlayerTeam { get; set; } = "";
+            public string PlayerName { get; set; } = "Unknown";
+            public ulong PlayerSteamID { get; set; }
+            public string OpponentName { get; set; } = "None";
+            public ulong OpponentSteamID { get; set; }
+            public string Weapon { get; set; } = "";
+            public int Damage { get; set; }
+            public bool IsHeadshot { get; set; }
+            public string Timestamp { get; set; } = "";
+        }
+
+        public class ObjectiveLog
+        {
+            public int Round { get; set; }
+            public string PlayerName { get; set; } = "Unknown";
+            public ulong PlayerSteamID { get; set; }
+            public string Event { get; set; } = "";
+            public string Timestamp { get; set; } = "";
+        }
+
+        public class ChatLog
+        {
+            public int Round { get; set; }
+            public string PlayerName { get; set; } = "Unknown";
+            public ulong PlayerSteamID { get; set; }
+            public string Message { get; set; } = "";
+            public bool TeamChat { get; set; }
+            public string Timestamp { get; set; } = "";
+        }
+
+        public class InlineListConverter<T> : JsonConverter<List<T>>
+        {
+            public override List<T>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            {
+                return JsonSerializer.Deserialize<List<T>>(ref reader, options);
+            }
+
+            public override void Write(Utf8JsonWriter writer, List<T> value, JsonSerializerOptions options)
+            {
+                var compactOptions = new JsonSerializerOptions { WriteIndented = false };
+                string jsonString = JsonSerializer.Serialize(value, compactOptions);
+                writer.WriteRawValue(jsonString);
+            }
+        }
+
         private readonly ConcurrentDictionary<ulong, PlayerMatchData> _playerStats = new();
+
+        private List<CombatLog> _globalKillFeed = new();
+        private List<ObjectiveLog> _globalEventFeed = new();
+        private List<ChatLog> _globalChatFeed = new();
+        private List<int> _ctScoreHistory = new();
+        private List<int> _tScoreHistory = new();
 
         private int _ctWins = 0;
         private int _tWins = 0;
+        private int _currentRound = 1;
         private string _currentMatchId = "";
         private DateTime _matchStartTime;
+        private bool _matchEndedNormally = false;
 
         private const int TEAM_CT_MANAGER_ID = 2;
         private const int TEAM_T_MANAGER_ID = 3;
 
-        // Workshop Config Data
         private readonly Dictionary<string, string> _workshopMapIds = new();
         private string _loadedCollectionId = "N/A";
         private readonly List<string> _loadLog = new();
 
-        // --- Configuration Data ---
         private bool _usesMatchLibrarian = true;
-
-        // Fields for File Watching and Warmup Tracking
         private FileSystemWatcher? _fileWatcher;
         private DateTime _lastReloadTime = DateTime.MinValue;
         private bool _wasWarmup = false;
         private string _lastMap = "";
 
+        private string _steamApiKey = "";
+        private const string WorkshopContentRelPath = "../bin/linuxsteamrt64/steamapps/workshop/content/730";
+        private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
+
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "3.9.0"; // Version Bump for Auto-Gen Configs
+        public override string ModuleVersion => "4.7.3";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -94,8 +196,16 @@ namespace ServerStats
             RegisterEventHandler<EventMapShutdown>(OnMapShutdown, HookMode.Post);
             RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd, HookMode.Post);
 
-            LoadConfigIni();   // Load general settings
-            LoadWorkshopIni(); // Load map mappings
+            RegisterEventHandler<EventBombPlanted>(OnBombPlanted, HookMode.Post);
+            RegisterEventHandler<EventBombDefused>(OnBombDefused, HookMode.Post);
+            RegisterEventHandler<EventBombExploded>(OnBombExploded, HookMode.Post);
+            RegisterEventHandler<EventHostageFollows>(OnHostagePickup, HookMode.Post);
+            RegisterEventHandler<EventHostageRescued>(OnHostageRescued, HookMode.Post);
+
+            RegisterEventHandler<EventPlayerChat>(OnPlayerChat, HookMode.Post);
+
+            LoadConfigIni();
+            LoadWorkshopIni();
             InitializeFileWatcher();
 
             _lastMap = Server.MapName;
@@ -108,7 +218,7 @@ namespace ServerStats
                 PrintPlayerStats(caller, cmdInfo);
             });
 
-            AddCommand("css_playerslog", "Show the log of loading workshop.ini", (caller, cmdInfo) =>
+            AddCommand("css_workshoplog", "Show the log of loading workshop.ini", (caller, cmdInfo) =>
             {
                 CmdLog(caller, cmdInfo);
             });
@@ -118,9 +228,27 @@ namespace ServerStats
                 cmdInfo.ReplyToCommand($"Server Collection ID: {_loadedCollectionId}");
             });
 
-            AddCommand("css_matchstats_status", "Check if database recording is enabled", (caller, cmdInfo) =>
+            AddCommand("css_databaseon", "Check if database recording is enabled", (caller, cmdInfo) =>
             {
                 cmdInfo.ReplyToCommand($"[ServerStats] Database Recording (UsesMatchLibrarian): {(_usesMatchLibrarian ? "ENABLED" : "DISABLED")}");
+            });
+
+            string baseGameDir = Server.GameDirectory;
+            if (Path.GetFileName(baseGameDir) == "game")
+            {
+                baseGameDir = Path.Combine(baseGameDir, "csgo");
+            }
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessWorkshopCollection(baseGameDir);
+                }
+                catch (Exception ex)
+                {
+                    LogWorkshopGrabber(baseGameDir, $"CRITICAL ERROR: {ex.Message}");
+                }
             });
         }
 
@@ -136,57 +264,307 @@ namespace ServerStats
                 _fileWatcher = null;
             }
         }
-
-        // --- SPLIT PATH LOGIC ---
-
-        // 1. Input Directory: .../configs/plugins/ServerStats/
+        
         private string ServerStatsConfigDir => Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "ServerStats");
         private string WorkshopIniPath => Path.Combine(ServerStatsConfigDir, "workshop.ini");
         private string GeneralConfigPath => Path.Combine(ServerStatsConfigDir, "config.ini");
 
-        // 2. Output Directory: .../configs/plugins/MatchLibrarian/matches/
         private string MatchLibrarianDir => Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "MatchLibrarian");
         private string MatchesDirPath => Path.Combine(MatchLibrarianDir, "matches");
 
+        private async Task ProcessWorkshopCollection(string csgoDir)
+        {
+            string configIniPath = Path.GetFullPath(Path.Combine(csgoDir, "addons/counterstrikesharp/configs/plugins/ServerStats/config.ini"));
+            string workshopIniPath = Path.GetFullPath(Path.Combine(csgoDir, "addons/counterstrikesharp/configs/plugins/ServerStats/workshop.ini"));
+            string workshopContentPath = Path.GetFullPath(Path.Combine(csgoDir, WorkshopContentRelPath));
+
+            LogWorkshopGrabber(csgoDir, $"--- Starting Workshop Map Loader Session: {DateTime.UtcNow} ---");
+
+            string collectionId = "";
+
+            if (File.Exists(configIniPath))
+            {
+                foreach (var line in File.ReadAllLines(configIniPath))
+                {
+                    var trimmed = line.Trim();
+                    if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#") || trimmed.StartsWith("//")) continue;
+
+                    if (trimmed.StartsWith("api_key=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var parts = trimmed.Split('=', 2);
+                        if (parts.Length > 1) _steamApiKey = parts[1].Trim();
+                    }
+                    else if (trimmed.StartsWith("collection_id=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var parts = trimmed.Split('=', 2);
+                        if (parts.Length > 1) collectionId = parts[1].Trim();
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(_steamApiKey))
+            {
+                LogWorkshopGrabber(csgoDir, "Error: 'api_key=' not found or empty in config.ini");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(collectionId))
+            {
+                LogWorkshopGrabber(csgoDir, "Error: 'collection_id=' not found in config.ini");
+                return;
+            }
+
+            LogWorkshopGrabber(csgoDir, $"Processing Collection ID from Config: {collectionId}");
+
+            List<string> mapIds;
+            try
+            {
+                mapIds = await FetchCollectionItems(collectionId);
+                LogWorkshopGrabber(csgoDir, $"API success. Found {mapIds.Count} items in collection.");
+            }
+            catch (Exception ex)
+            {
+                LogWorkshopGrabber(csgoDir, $"API Request Failed: {ex.Message}");
+                return;
+            }
+
+            Dictionary<string, string> validMaps = new Dictionary<string, string>();
+
+            if (!Directory.Exists(workshopContentPath))
+            {
+                LogWorkshopGrabber(csgoDir, $"Error: Workshop content path missing: {workshopContentPath}");
+                return;
+            }
+
+            foreach (var mapId in mapIds)
+            {
+                string mapFolderPath = Path.Combine(workshopContentPath, mapId);
+
+                if (!Directory.Exists(mapFolderPath)) continue;
+
+                var vpkFiles = Directory.GetFiles(mapFolderPath, "*.vpk");
+                if (vpkFiles.Length == 0) continue;
+
+                string mainVpkPath;
+                var dirVpk = vpkFiles.FirstOrDefault(f => f.EndsWith("_dir.vpk", StringComparison.OrdinalIgnoreCase));
+
+                if (dirVpk != null)
+                {
+                    mainVpkPath = dirVpk;
+                }
+                else
+                {
+                    Array.Sort(vpkFiles);
+                    mainVpkPath = vpkFiles[0];
+                }
+
+                string? internalMapName = ExtractMapNameFromVpk(mainVpkPath, mapId, csgoDir);
+
+                if (!string.IsNullOrEmpty(internalMapName))
+                {
+                    validMaps[internalMapName] = mapId;
+                    LogWorkshopGrabber(csgoDir, $"Identified: {internalMapName} -> {mapId}");
+                }
+                else
+                {
+                    LogWorkshopGrabber(csgoDir, $"Warning: Could not parse map name from VPK for ID {mapId}");
+                }
+            }
+
+            List<string> newOutput = new List<string>();
+            newOutput.Add($"// Generated by ServerStats from Collection: {collectionId}");
+
+            foreach (var kvp in validMaps.OrderBy(x => x.Key))
+            {
+                newOutput.Add($"{kvp.Key}={kvp.Value}");
+            }
+
+            try
+            {
+                File.WriteAllLines(workshopIniPath, newOutput);
+                LogWorkshopGrabber(csgoDir, $"Success! Updated workshop.ini with {validMaps.Count} maps.");
+                Server.NextFrame(LoadWorkshopIni);
+            }
+            catch (Exception ex)
+            {
+                LogWorkshopGrabber(csgoDir, $"Error writing workshop.ini: {ex.Message}");
+            }
+        }
+
+        private async Task<List<string>> FetchCollectionItems(string collectionId)
+        {
+            using var client = new HttpClient();
+            var content = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("collectioncount", "1"),
+                new KeyValuePair<string, string>("publishedfileids[0]", collectionId)
+            });
+
+            string url = $"https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/?key={_steamApiKey}";
+            var response = await client.PostAsync(url, content);
+            response.EnsureSuccessStatusCode();
+
+            string json = await response.Content.ReadAsStringAsync();
+            var data = JsonSerializer.Deserialize<SteamCollectionResponse>(json);
+
+            List<string> ids = new List<string>();
+            if (data?.response?.collectiondetails != null && data.response.collectiondetails.Count > 0)
+            {
+                var children = data.response.collectiondetails[0].children;
+                if (children != null)
+                {
+                    foreach (var child in children)
+                    {
+                        if (child.publishedfileid != null)
+                            ids.Add(child.publishedfileid);
+                    }
+                }
+            }
+            return ids;
+        }
+
+        private string? ExtractMapNameFromVpk(string vpkPath, string mapId, string logDir)
+        {
+            try
+            {
+                using var fs = new FileStream(vpkPath, FileMode.Open, FileAccess.Read);
+                using var reader = new BinaryReader(fs);
+
+                uint signature = reader.ReadUInt32();
+                if (signature != 0x55aa1234) return null;
+
+                uint version = reader.ReadUInt32();
+                uint treeSize = reader.ReadUInt32();
+                if (version == 2) reader.ReadBytes(16);
+
+                long treeStart = fs.Position;
+                long treeEnd = treeStart + treeSize;
+
+                List<string> foundMaps = new List<string>();
+
+                while (fs.Position < treeEnd)
+                {
+                    string extension = ReadNullTerminatedString(reader);
+                    if (extension == "") break;
+
+                    while (fs.Position < treeEnd)
+                    {
+                        string path = ReadNullTerminatedString(reader);
+                        if (path == "") break;
+
+                        string normPath = path.Replace("\\", "/");
+                        bool isMapLocation = (normPath == "maps" || string.IsNullOrWhiteSpace(normPath));
+
+                        while (fs.Position < treeEnd)
+                        {
+                            string filename = ReadNullTerminatedString(reader);
+                            if (filename == "") break;
+
+                            uint crc = reader.ReadUInt32();
+                            ushort preloadBytes = reader.ReadUInt16();
+                            reader.ReadUInt16();
+                            reader.ReadUInt32();
+                            reader.ReadUInt32();
+                            ushort terminator = reader.ReadUInt16();
+
+                            if (terminator != 0xFFFF) break;
+                            if (preloadBytes > 0) reader.ReadBytes(preloadBytes);
+
+                            if (extension == "vpk" && isMapLocation)
+                            {
+                                foundMaps.Add(filename);
+                            }
+                        }
+                    }
+                }
+
+                if (foundMaps.Count > 0)
+                {
+                    foundMaps.Sort();
+                    return foundMaps[0];
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private string ReadNullTerminatedString(BinaryReader reader)
+        {
+            List<byte> charBytes = new List<byte>();
+            while (true)
+            {
+                if (reader.BaseStream.Position >= reader.BaseStream.Length) break;
+                byte b = reader.ReadByte();
+                if (b == 0x00) break;
+                charBytes.Add(b);
+            }
+            return Encoding.UTF8.GetString(charBytes.ToArray());
+        }
+
+        private void LogWorkshopGrabber(string baseDir, string message)
+        {
+            try
+            {
+                string logFullPath = Path.Combine(baseDir, WorkshopGrabLogRelPath);
+                string timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+                string logLine = $"[{timestamp}] {message}{Environment.NewLine}";
+
+                string? directory = Path.GetDirectoryName(logFullPath);
+                if (directory != null && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.AppendAllText(logFullPath, logLine);
+            }
+            catch { }
+        }
+
         private void StartNewMatchId()
         {
-            _currentMatchId = DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss");
-            _matchStartTime = DateTime.Now;
+            _currentMatchId = DateTime.UtcNow.ToString("yyyy-MM-dd-HH-mm-ss");
+            _matchStartTime = DateTime.UtcNow;
+            _matchEndedNormally = false;
+
             _playerStats.Clear();
+            _globalKillFeed.Clear();
+            _globalEventFeed.Clear();
+            _globalChatFeed.Clear();
+            _ctScoreHistory.Clear();
+            _tScoreHistory.Clear();
+
             _ctWins = 0;
             _tWins = 0;
-            Console.WriteLine($"[PlayerStats] Started new Match ID: {_currentMatchId}");
+            _currentRound = 1;
+            Console.WriteLine($"[ServerStats] Started new Match ID: {_currentMatchId}");
         }
 
         private void InitializeFileWatcher()
         {
             try
             {
-                // Ensure Input Directory Exists (ServerStats)
                 if (!Directory.Exists(ServerStatsConfigDir)) Directory.CreateDirectory(ServerStatsConfigDir);
-
-                // Ensure Output Directory Exists (MatchLibrarian)
                 if (!Directory.Exists(MatchLibrarianDir)) Directory.CreateDirectory(MatchLibrarianDir);
                 if (!Directory.Exists(MatchesDirPath)) Directory.CreateDirectory(MatchesDirPath);
 
-                // Watch the ServerStats folder for config changes
                 _fileWatcher = new FileSystemWatcher(ServerStatsConfigDir);
                 _fileWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName;
                 _fileWatcher.Filter = "*.ini";
                 _fileWatcher.Changed += OnConfigFileChanged;
                 _fileWatcher.EnableRaisingEvents = true;
-                Console.WriteLine($"[PlayerStats] Watching for config changes in: {ServerStatsConfigDir}");
+                Console.WriteLine($"[ServerStats] Watching for config changes in: {ServerStatsConfigDir}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[PlayerStats] Failed to initialize file watcher: {ex.Message}");
+                Console.WriteLine($"[ServerStats] Failed to initialize file watcher: {ex.Message}");
             }
         }
 
         private void OnConfigFileChanged(object sender, FileSystemEventArgs e)
         {
-            if ((DateTime.Now - _lastReloadTime).TotalSeconds < 1) return;
-            _lastReloadTime = DateTime.Now;
+            if ((DateTime.UtcNow - _lastReloadTime).TotalSeconds < 1) return;
+            _lastReloadTime = DateTime.UtcNow;
 
             if (e.Name != null && e.Name.Contains("workshop.ini"))
             {
@@ -202,23 +580,20 @@ namespace ServerStats
         {
             try
             {
-                // Ensure directory exists first
                 if (!Directory.Exists(ServerStatsConfigDir)) Directory.CreateDirectory(ServerStatsConfigDir);
 
                 if (!File.Exists(GeneralConfigPath))
                 {
-                    // Generate Default config.ini with provided content
                     string defaultConfig = @"// ServerStats General Configuration
-// -----------------------------------------------------------
-
-// Enables or Disables the Match Librarian database functionality.
-// true  = Matches will be saved to JSON files in the /configs/plugins/MatchLibrarian/matches folder.
-// false = Live stats (css_players) will work, but nothing is saved to disk.
-UsesMatchLibrarian=true";
-
+UsesMatchLibrarian=true
+// Insert your Steam Web API Key below
+api_key=
+// Insert your Workshop Collection ID below
+collection_id=";
                     File.WriteAllText(GeneralConfigPath, defaultConfig);
                     _usesMatchLibrarian = true;
-                    Console.WriteLine("[PlayerStats] Created default config.ini.");
+                    _loadedCollectionId = "N/A";
+                    Console.WriteLine("[ServerStats] Created default config.ini.");
                     return;
                 }
 
@@ -227,7 +602,7 @@ UsesMatchLibrarian=true";
                     var trimmed = line.Trim();
                     if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("//") || trimmed.StartsWith("#")) continue;
 
-                    var parts = trimmed.Split('=');
+                    var parts = trimmed.Split('=', 2);
                     if (parts.Length != 2) continue;
 
                     var key = parts[0].Trim();
@@ -235,47 +610,42 @@ UsesMatchLibrarian=true";
 
                     if (key.Equals("UsesMatchLibrarian", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (bool.TryParse(value, out bool result))
-                        {
-                            _usesMatchLibrarian = result;
-                        }
+                        if (bool.TryParse(value, out bool result)) _usesMatchLibrarian = result;
+                    }
+                    else if (key.Equals("api_key", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _steamApiKey = value;
+                    }
+                    else if (key.Equals("collection_id", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _loadedCollectionId = value;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[PlayerStats] Error loading config.ini: {ex.Message}");
+                Console.WriteLine($"[ServerStats] Error loading config.ini: {ex.Message}");
             }
         }
 
         private void LoadWorkshopIni()
         {
             _workshopMapIds.Clear();
-            _loadedCollectionId = "N/A"; // Reset before load
             _loadLog.Clear();
             _loadLog.Add($"Reading workshop.ini from: {WorkshopIniPath}");
 
             try
             {
-                // Ensure directory exists first
                 if (!Directory.Exists(ServerStatsConfigDir)) Directory.CreateDirectory(ServerStatsConfigDir);
 
                 if (!File.Exists(WorkshopIniPath))
                 {
-                    // Generate Default workshop.ini with provided content
-                    string defaultWorkshop = @"// format: key = value
-// 1. Collection ID for output
-collection_id=3461157618
-
-// 1. Map Name to Workshop ID Mappings
-// These allows websites to externally fetch the correct workshop image for the map
-de_zoo=3101352333
-de_jingshen_d=3250391658
-de_iris=1591780701";
+                    string defaultWorkshop = @"// This file is automatically generated by ServerStats if api_key and collection_id are set in config.ini
+// You can also manually add map=id pairs here.";
 
                     File.WriteAllText(WorkshopIniPath, defaultWorkshop);
                     _loadLog.Add("Created default workshop.ini.");
-                    Console.WriteLine("[PlayerStats] Created default workshop.ini.");
+                    Console.WriteLine("[ServerStats] Created default workshop.ini.");
                 }
 
                 string[] lines = File.ReadAllLines(WorkshopIniPath);
@@ -284,7 +654,6 @@ de_iris=1591780701";
                     string trimmed = line.Trim();
                     if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("//") || trimmed.StartsWith("#")) continue;
 
-                    // Expect format: key=value
                     string[] parts = trimmed.Split('=');
                     if (parts.Length < 2) continue;
 
@@ -293,12 +662,9 @@ de_iris=1591780701";
 
                     if (key.Equals("collection_id", StringComparison.OrdinalIgnoreCase))
                     {
-                        _loadedCollectionId = value;
-                        _loadLog.Add($"-> Set Collection ID: {_loadedCollectionId}");
                     }
                     else
                     {
-                        // Assume it is a map map (e.g. de_zoo=12345)
                         if (!_workshopMapIds.ContainsKey(key))
                         {
                             _workshopMapIds.Add(key, value);
@@ -306,12 +672,12 @@ de_iris=1591780701";
                     }
                 }
                 _loadLog.Add($"DONE: Loaded CollectionID: {_loadedCollectionId} | Mapped Maps: {_workshopMapIds.Count}");
-                Console.WriteLine($"[PlayerStats] Loaded CollectionID: {_loadedCollectionId} and {_workshopMapIds.Count} map IDs.");
+                Console.WriteLine($"[ServerStats] Loaded CollectionID: {_loadedCollectionId} and {_workshopMapIds.Count} map IDs.");
             }
             catch (Exception ex)
             {
                 _loadLog.Add($"EXCEPTION: {ex.Message}");
-                Console.WriteLine($"[PlayerStats] Exception loading workshop.ini: {ex.Message}");
+                Console.WriteLine($"[ServerStats] Exception loading workshop.ini: {ex.Message}");
             }
         }
 
@@ -340,12 +706,12 @@ de_iris=1591780701";
 
             if (!_wasWarmup && isWarmupNow && currentMap == _lastMap)
             {
-                Console.WriteLine("[PlayerStats] Warmup restart detected. Resetting stats.");
+                Console.WriteLine("[ServerStats] Warmup restart detected. Resetting stats.");
                 StartNewMatchId();
             }
             else if (currentMap != _lastMap)
             {
-                Console.WriteLine($"[PlayerStats] Map changed from {_lastMap} to {currentMap}. New Match.");
+                Console.WriteLine($"[ServerStats] Map changed from {_lastMap} to {currentMap}. New Match.");
                 _lastMap = currentMap;
                 StartNewMatchId();
             }
@@ -362,13 +728,13 @@ de_iris=1591780701";
 
         private HookResult OnMatchEnd(EventCsWinPanelMatch @event, GameEventInfo info)
         {
+            _matchEndedNormally = true;
+
             UpdateTeamScores();
             SaveMatchData();
-            Console.WriteLine($"[PlayerStats] Match Finished. Final data saved for ID: {_currentMatchId}");
+            Console.WriteLine($"[ServerStats] Match Finished. Final data saved for ID: {_currentMatchId}");
             return HookResult.Continue;
         }
-
-        // --- Core Tracking Logic ---
 
         private PlayerMatchData GetOrAddPlayer(CCSPlayerController player)
         {
@@ -377,13 +743,41 @@ de_iris=1591780701";
             ulong steamId = player.SteamID;
             if (steamId == 0) steamId = (ulong)player.Handle.ToInt64();
 
-            return _playerStats.GetOrAdd(steamId, _ => new PlayerMatchData
-            {
-                SteamID = steamId,
-                Name = player.PlayerName ?? "Unknown",
-                IsBot = player.IsBot,
-                TeamNum = player.TeamNum
+            return _playerStats.GetOrAdd(steamId, _ => {
+                var newData = new PlayerMatchData
+                {
+                    SteamID = steamId,
+                    Name = player.PlayerName ?? "Unknown",
+                    IsBot = player.IsBot,
+                    CurrentTeam = player.TeamNum
+                };
+
+                for (int i = 0; i < _currentRound - 1; i++)
+                {
+                    newData.TeamHistory.Add(0);
+                    newData.KillsHistory.Add(0);
+                    newData.DeathsHistory.Add(0);
+                    newData.AssistsHistory.Add(0);
+                    newData.ZeusKillsHistory.Add(0);
+                    newData.MVPsHistory.Add(0);
+                    newData.ScoreHistory.Add(0);
+                    newData.AliveHistory.Add(false);
+                    newData.InventoryHistory.Add("");
+                }
+
+                return newData;
             });
+        }
+
+        private string GetTeamName(int teamNum)
+        {
+            return teamNum switch
+            {
+                2 => "T",
+                3 => "CT",
+                1 => "SPEC",
+                _ => "None"
+            };
         }
 
         private HookResult OnPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
@@ -395,35 +789,135 @@ de_iris=1591780701";
                 var victim = @event.Userid;
                 var attacker = @event.Attacker;
                 var assister = @event.Assister;
+                string weaponName = @event.Weapon ?? "unknown";
+                int damageDone = @event.DmgHealth;
+                bool isHeadshot = @event.Headshot;
 
                 if (victim != null && victim.IsValid)
                 {
                     var data = GetOrAddPlayer(victim);
-                    data.Deaths++;
-                    UpdateSnapshotData(victim, data);
+                    data.CurrentDeaths++;
+
+                    string attackerName = (attacker != null && attacker.IsValid) ? (attacker.PlayerName ?? "Unknown") : "World/Self";
+                    ulong attackerSteamID = (attacker != null && attacker.IsValid) ? attacker.SteamID : 0;
+
+                    _globalKillFeed.Add(new CombatLog
+                    {
+                        Round = _currentRound,
+                        Type = "Death",
+                        PlayerTeam = GetTeamName(victim.TeamNum),
+                        PlayerName = data.Name,
+                        PlayerSteamID = data.SteamID,
+                        OpponentName = attackerName,
+                        OpponentSteamID = attackerSteamID,
+                        Weapon = weaponName,
+                        Damage = damageDone,
+                        IsHeadshot = isHeadshot,
+                        Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
+                    });
                 }
 
                 if (attacker != null && attacker.IsValid && attacker != victim)
                 {
                     var data = GetOrAddPlayer(attacker);
-                    data.Kills++;
+                    data.CurrentKills++;
 
-                    string weaponName = @event.Weapon ?? "";
                     if (weaponName.Contains("taser", StringComparison.OrdinalIgnoreCase))
                     {
-                        data.ZeusKills++;
+                        data.CurrentZeusKills++;
                     }
-                    UpdateSnapshotData(attacker, data);
+
+                    string victimName = (victim != null && victim.IsValid) ? (victim.PlayerName ?? "Unknown") : "Unknown";
+                    ulong victimSteamID = (victim != null && victim.IsValid) ? victim.SteamID : 0;
+
+                    _globalKillFeed.Add(new CombatLog
+                    {
+                        Round = _currentRound,
+                        Type = "Kill",
+                        PlayerTeam = GetTeamName(attacker.TeamNum),
+                        PlayerName = data.Name,
+                        PlayerSteamID = data.SteamID,
+                        OpponentName = victimName,
+                        OpponentSteamID = victimSteamID,
+                        Weapon = weaponName,
+                        Damage = damageDone,
+                        IsHeadshot = isHeadshot,
+                        Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
+                    });
                 }
 
                 if (assister != null && assister.IsValid && assister != attacker && assister != victim)
                 {
                     var data = GetOrAddPlayer(assister);
-                    data.Assists++;
-                    UpdateSnapshotData(assister, data);
+                    data.CurrentAssists++;
                 }
             }
             catch { }
+
+            return HookResult.Continue;
+        }
+
+        private void LogObjective(CCSPlayerController? player, string eventDescription)
+        {
+            if (player == null || !player.IsValid || IsWarmup()) return;
+
+            var data = GetOrAddPlayer(player);
+            _globalEventFeed.Add(new ObjectiveLog
+            {
+                Round = _currentRound,
+                PlayerName = data.Name,
+                PlayerSteamID = data.SteamID,
+                Event = eventDescription,
+                Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
+            });
+        }
+
+        private HookResult OnBombPlanted(EventBombPlanted @event, GameEventInfo info)
+        {
+            LogObjective(@event.Userid, "Bomb Planted");
+            return HookResult.Continue;
+        }
+
+        private HookResult OnBombDefused(EventBombDefused @event, GameEventInfo info)
+        {
+            LogObjective(@event.Userid, "Bomb Defused");
+            return HookResult.Continue;
+        }
+
+        private HookResult OnBombExploded(EventBombExploded @event, GameEventInfo info)
+        {
+            LogObjective(@event.Userid, "Bomb Exploded");
+            return HookResult.Continue;
+        }
+
+        private HookResult OnHostagePickup(EventHostageFollows @event, GameEventInfo info)
+        {
+            LogObjective(@event.Userid, "Hostage Picked Up");
+            return HookResult.Continue;
+        }
+
+        private HookResult OnHostageRescued(EventHostageRescued @event, GameEventInfo info)
+        {
+            LogObjective(@event.Userid, "Hostage Rescued");
+            return HookResult.Continue;
+        }
+
+        private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
+        {
+            if (IsWarmup()) return HookResult.Continue;
+
+            var player = Utilities.GetPlayerFromUserid(@event.Userid);
+            if (player == null || !player.IsValid) return HookResult.Continue;
+
+            _globalChatFeed.Add(new ChatLog
+            {
+                Round = _currentRound,
+                PlayerName = player.PlayerName ?? "Unknown",
+                PlayerSteamID = player.SteamID,
+                Message = @event.Text ?? "",
+                TeamChat = @event.Teamonly,
+                Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
+            });
 
             return HookResult.Continue;
         }
@@ -434,35 +928,55 @@ de_iris=1591780701";
 
             UpdateTeamScores();
 
-            var connectedPlayers = Utilities.GetPlayers().Where(p => p.IsValid && p.Connected == PlayerConnectedState.PlayerConnected);
-            foreach (var p in connectedPlayers)
+            _ctScoreHistory.Add(_ctWins);
+            _tScoreHistory.Add(_tWins);
+
+            foreach (var kvp in _playerStats)
             {
-                var data = GetOrAddPlayer(p);
-                UpdateSnapshotData(p, data);
+                var data = kvp.Value;
+
+                var playerEntity = Utilities.GetPlayers().FirstOrDefault(p => p.SteamID == data.SteamID);
+
+                if (playerEntity != null && playerEntity.IsValid)
+                {
+                    UpdateLivePlayerFields(playerEntity, data);
+                }
+                else
+                {
+                    data.AliveHistory.Add(false);
+                    data.InventoryHistory.Add("");
+                }
+
+                data.TeamHistory.Add(data.CurrentTeam);
+                data.KillsHistory.Add(data.CurrentKills);
+                data.DeathsHistory.Add(data.CurrentDeaths);
+                data.AssistsHistory.Add(data.CurrentAssists);
+                data.ZeusKillsHistory.Add(data.CurrentZeusKills);
+                data.MVPsHistory.Add(data.CurrentMVPs);
+                data.ScoreHistory.Add(data.CurrentScore);
             }
+
+            _currentRound++;
 
             SaveMatchData();
             return HookResult.Continue;
         }
 
-        private void UpdateSnapshotData(CCSPlayerController p, PlayerMatchData data)
+        private void UpdateLivePlayerFields(CCSPlayerController p, PlayerMatchData data)
         {
-            if (p == null || !p.IsValid) return;
-
             data.Name = p.PlayerName ?? data.Name;
-            data.TeamNum = p.TeamNum;
-            data.Score = GetPlayerScore(p);
-            data.MVPs = GetPlayerMVP(p);
-            data.Money = GetPlayerMoney(p);
-            data.Inventory = GetPlayerInventory(p);
-            data.Ping = p.IsBot ? 0 : (int)p.Ping;
+            data.CurrentTeam = p.TeamNum;
+            data.CurrentScore = GetPlayerScore(p);
+            data.CurrentMVPs = GetPlayerMVP(p);
 
             bool isAlive = false;
             if (p.PlayerPawn?.Value is CCSPlayerPawn pawn && pawn.IsValid && pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE)
             {
                 isAlive = true;
             }
-            data.IsAlive = isAlive;
+            data.AliveHistory.Add(isAlive);
+
+            data.InventoryHistory.Add(GetPlayerInventory(p));
         }
 
         private void SaveMatchData()
@@ -473,59 +987,47 @@ de_iris=1591780701";
             try
             {
                 var mapName = Server.MapName;
-                // Cross-reference map name with workshop.ini data
                 string workshopId = _workshopMapIds.TryGetValue(mapName, out var id) ? id : "N/A";
 
                 var currentMatchDb = new MatchDatabase
                 {
                     MatchID = _currentMatchId,
+                    MatchComplete = _matchEndedNormally,
                     MapName = mapName,
                     WorkshopID = workshopId,
                     CollectionID = _loadedCollectionId,
                     StartTime = _matchStartTime,
-                    LastUpdated = DateTime.Now,
+                    LastUpdated = DateTime.UtcNow,
                     CTWins = _ctWins,
                     TWins = _tWins,
+                    TotalRounds = _ctWins + _tWins,
+                    CTScoreHistory = _ctScoreHistory,
+                    TScoreHistory = _tScoreHistory,
                     IsWarmup = IsWarmup(),
-                    Players = _playerStats.Values.ToList()
+                    Players = _playerStats.Values.ToList(),
+                    KillFeed = _globalKillFeed,
+                    EventFeed = _globalEventFeed,
+                    ChatFeed = _globalChatFeed
                 };
 
-                var now = DateTime.Now;
+                var now = DateTime.UtcNow;
                 var yearFolder = now.ToString("yyyy");
                 var monthFolder = now.ToString("MM");
+                var dayFolder = now.ToString("dd");
 
-                // --- SAVING TO MATCHLIBRARIAN FOLDER ---
-                var dailyDirectory = Path.Combine(MatchesDirPath, yearFolder, monthFolder);
+                var dailyDirectory = Path.Combine(MatchesDirPath, yearFolder, monthFolder, dayFolder);
 
                 if (!Directory.Exists(dailyDirectory)) Directory.CreateDirectory(dailyDirectory);
 
-                var dayFileName = $"{now.ToString("dd")}.json";
-                var fullFilePath = Path.Combine(dailyDirectory, dayFileName);
-
-                List<MatchDatabase> dailyMatches;
-
-                if (File.Exists(fullFilePath))
-                {
-                    var existingJson = File.ReadAllText(fullFilePath);
-                    try { dailyMatches = JsonSerializer.Deserialize<List<MatchDatabase>>(existingJson) ?? new List<MatchDatabase>(); }
-                    catch { dailyMatches = new List<MatchDatabase>(); }
-                }
-                else
-                {
-                    dailyMatches = new List<MatchDatabase>();
-                }
-
-                var existingIndex = dailyMatches.FindIndex(m => m.MatchID == _currentMatchId);
-
-                if (existingIndex != -1) dailyMatches[existingIndex] = currentMatchDb;
-                else dailyMatches.Add(currentMatchDb);
+                var matchFileName = $"{_currentMatchId}.json";
+                var fullFilePath = Path.Combine(dailyDirectory, matchFileName);
 
                 var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(fullFilePath, JsonSerializer.Serialize(dailyMatches, jsonOptions));
+                File.WriteAllText(fullFilePath, JsonSerializer.Serialize(currentMatchDb, jsonOptions));
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[PlayerStats] Error saving match data: {ex.Message}");
+                Console.WriteLine($"[ServerStats] Error saving match data: {ex.Message}");
             }
         }
 
@@ -546,24 +1048,16 @@ de_iris=1591780701";
             foreach (var player in allPlayers)
             {
                 var data = GetOrAddPlayer(player);
-                if (data.ZeusKills > maxZeusKills)
+                if (data.CurrentZeusKills > maxZeusKills)
                 {
-                    maxZeusKills = data.ZeusKills;
+                    maxZeusKills = data.CurrentZeusKills;
                     zeusLeaderName = player.PlayerName ?? "Unknown";
                 }
             }
 
-            if (maxZeusKills > 0)
-            {
-                cmd.ReplyToCommand($"--- Zeus Leader: {zeusLeaderName} ({maxZeusKills} Kills) ---");
-            }
-
             bool isWarmup = IsWarmup();
             string mapName = Server.MapName;
-
-            // STRICT LOOKUP: Get Workshop ID from the dictionary loaded from workshop.ini
             string workshopId = _workshopMapIds.TryGetValue(mapName, out var id) ? id : "N/A";
-
             string recordingStatus = _usesMatchLibrarian ? "ON" : "OFF";
 
             cmd.ReplyToCommand($"--- Status: Map: {mapName} | ID: {_currentMatchId} | CollectionID: {_loadedCollectionId} | WorkshopID: {workshopId} | Warmup: {(isWarmup ? "Yes" : "No")} | DB: {recordingStatus} ---");
@@ -582,35 +1076,33 @@ de_iris=1591780701";
                 foreach (var p in bots) PrintSinglePlayerStat(p, cmd);
             }
 
+            if (maxZeusKills > 0)
+            {
+                cmd.ReplyToCommand($"--- Zeus Leader: {zeusLeaderName} ({maxZeusKills} Kills) ---");
+            }
+
             cmd.ReplyToCommand("--- End ---");
         }
 
         private void PrintSinglePlayerStat(CCSPlayerController p, CommandInfo cmd)
         {
             var data = GetOrAddPlayer(p);
-            UpdateSnapshotData(p, data);
+            int score = GetPlayerScore(p);
+            int money = GetPlayerMoney(p);
 
-            var pingStr = data.IsBot ? "BOT" : data.Ping.ToString();
+            var pingStr = p.IsBot ? "BOT" : p.Ping.ToString();
+            string teamStr = GetTeamName(p.TeamNum);
 
-            string teamStr = "None";
-            switch (data.TeamNum)
+            bool isAlive = false;
+            if (p.PlayerPawn?.Value is CCSPlayerPawn pawn && pawn.IsValid && pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE)
             {
-                case 2: teamStr = "T"; break;
-                case 3: teamStr = "CT"; break;
-                case 1: teamStr = "SPEC"; break;
+                isAlive = true;
             }
 
             cmd.ReplyToCommand(
-                $"[{p.Slot}] {data.Name} | Team:{teamStr} K:{data.Kills} D:{data.Deaths} A:{data.Assists} Z:{data.ZeusKills} MVP:{data.MVPs} Score:{data.Score} Money:${data.Money} Alive:{(data.IsAlive ? "Yes" : "No")} Ping:{pingStr}"
+                $"[{p.Slot}] {data.Name} | Team:{teamStr} K:{data.CurrentKills} D:{data.CurrentDeaths} A:{data.CurrentAssists} Z:{data.CurrentZeusKills} MVP:{data.CurrentMVPs} Score:{score} Money:${money} Alive:{(isAlive ? "Yes" : "No")} Ping:{pingStr}"
             );
-
-            if (data.IsAlive && !string.IsNullOrEmpty(data.Inventory))
-            {
-                cmd.ReplyToCommand($" -> Inventory: {data.Inventory}");
-            }
         }
-
-        // --- Helper Methods ---
 
         private string GetPlayerInventory(CCSPlayerController player)
         {
@@ -680,6 +1172,23 @@ de_iris=1591780701";
                 }
             }
             catch { }
+        }
+
+        public class SteamCollectionResponse
+        {
+            public SteamCollectionResponseData? response { get; set; }
+        }
+        public class SteamCollectionResponseData
+        {
+            public List<CollectionDetails>? collectiondetails { get; set; }
+        }
+        public class CollectionDetails
+        {
+            public List<CollectionChild>? children { get; set; }
+        }
+        public class CollectionChild
+        {
+            public string? publishedfileid { get; set; }
         }
     }
 }
