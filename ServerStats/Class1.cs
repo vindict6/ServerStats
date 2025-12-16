@@ -167,6 +167,9 @@ namespace ServerStats
         private DateTime _matchStartTime;
         private bool _matchEndedNormally = false;
 
+        // Tracks if the stats for the current round number have been pushed to history
+        private bool _roundStatsSnapshotTaken = false;
+
         private const int TEAM_CT_MANAGER_ID = 2;
         private const int TEAM_T_MANAGER_ID = 3;
 
@@ -185,7 +188,7 @@ namespace ServerStats
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "2.0.0";
+        public override string ModuleVersion => "2.0.3";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -195,6 +198,7 @@ namespace ServerStats
             RegisterEventHandler<EventRoundPrestart>(OnRoundPrestart, HookMode.Post);
             RegisterEventHandler<EventMapShutdown>(OnMapShutdown, HookMode.Post);
             RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd, HookMode.Post);
+            RegisterEventHandler<EventRoundAnnounceMatchStart>(OnMatchRestart, HookMode.Post);
 
             RegisterEventHandler<EventBombPlanted>(OnBombPlanted, HookMode.Post);
             RegisterEventHandler<EventBombDefused>(OnBombDefused, HookMode.Post);
@@ -537,6 +541,7 @@ namespace ServerStats
             _ctWins = 0;
             _tWins = 0;
             _currentRound = 1;
+            _roundStatsSnapshotTaken = false;
             Console.WriteLine($"[ServerStats] Started new Match ID: {_currentMatchId}");
         }
 
@@ -703,6 +708,7 @@ collection_id=";
         {
             string currentMap = Server.MapName;
             bool isWarmupNow = IsWarmup();
+            _roundStatsSnapshotTaken = false;
 
             if (!_wasWarmup && isWarmupNow && currentMap == _lastMap)
             {
@@ -720,6 +726,14 @@ collection_id=";
             return HookResult.Continue;
         }
 
+        private HookResult OnMatchRestart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
+        {
+            Console.WriteLine("[ServerStats] Match restart detected (mp_restartgame or warmup end). Saving and starting new match.");
+            SaveMatchData();
+            StartNewMatchId();
+            return HookResult.Continue;
+        }
+
         private HookResult OnMapShutdown(EventMapShutdown @event, GameEventInfo info)
         {
             SaveMatchData();
@@ -730,7 +744,12 @@ collection_id=";
         {
             _matchEndedNormally = true;
 
-            UpdateTeamScores();
+            // Ensure the final round stats are captured if not already done by OnRoundEnded
+            if (!_roundStatsSnapshotTaken)
+            {
+                SnapshotRoundStats();
+            }
+
             SaveMatchData();
             Console.WriteLine($"[ServerStats] Match Finished. Final data saved for ID: {_currentMatchId}");
             return HookResult.Continue;
@@ -926,16 +945,43 @@ collection_id=";
         {
             if (IsWarmup()) return HookResult.Continue;
 
+            SnapshotRoundStats();
+            _currentRound++;
+
+            SaveMatchData();
+            return HookResult.Continue;
+        }
+
+        private void SnapshotRoundStats()
+        {
+            if (_roundStatsSnapshotTaken) return;
+
             UpdateTeamScores();
 
             _ctScoreHistory.Add(_ctWins);
             _tScoreHistory.Add(_tWins);
 
+            // FORCE update: ensure all currently connected players (including passive bots) are in the system
+            foreach (var p in Utilities.GetPlayers())
+            {
+                if (p != null && p.IsValid && p.Connected == PlayerConnectedState.PlayerConnected)
+                {
+                    GetOrAddPlayer(p);
+                }
+            }
+
             foreach (var kvp in _playerStats)
             {
                 var data = kvp.Value;
 
-                var playerEntity = Utilities.GetPlayers().FirstOrDefault(p => p.SteamID == data.SteamID);
+                // Handle bots (SteamID 0) properly
+                var playerEntity = Utilities.GetPlayers().FirstOrDefault(p =>
+                {
+                    if (p == null || !p.IsValid) return false;
+                    ulong pid = p.SteamID;
+                    if (pid == 0) pid = (ulong)p.Handle.ToInt64();
+                    return pid == data.SteamID;
+                });
 
                 if (playerEntity != null && playerEntity.IsValid)
                 {
@@ -956,10 +1002,7 @@ collection_id=";
                 data.ScoreHistory.Add(data.CurrentScore);
             }
 
-            _currentRound++;
-
-            SaveMatchData();
-            return HookResult.Continue;
+            _roundStatsSnapshotTaken = true;
         }
 
         private void UpdateLivePlayerFields(CCSPlayerController p, PlayerMatchData data)
@@ -983,6 +1026,9 @@ collection_id=";
         {
             if (!_usesMatchLibrarian) return;
             if (string.IsNullOrEmpty(_currentMatchId)) return;
+
+            // Prevent saving matches with 0 recorded rounds
+            if (_ctScoreHistory.Count == 0 && _tScoreHistory.Count == 0) return;
 
             try
             {
