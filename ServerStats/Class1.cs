@@ -185,7 +185,7 @@ namespace ServerStats
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "4.7.3";
+        public override string ModuleVersion => "2.0.0";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -264,7 +264,7 @@ namespace ServerStats
                 _fileWatcher = null;
             }
         }
-        
+
         private string ServerStatsConfigDir => Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "ServerStats");
         private string WorkshopIniPath => Path.Combine(ServerStatsConfigDir, "workshop.ini");
         private string GeneralConfigPath => Path.Combine(ServerStatsConfigDir, "config.ini");
