@@ -1,10 +1,13 @@
 This CS2 plugin outputs all major match and server data through rcon command css_players
 
 Run the plugin once to generate default configs. The plugin will re-read from workshop.ini if it is changed while the
-server is already running.
+server is already running. Use the css_databaseon to see the status of match json database output.
 
-In the workshop.ini config (/steam/cs2/game/csgo/addons/counterstrikesharp/configs/plugins/ServerStats/workshop.ini), you must
-set the collection ID as well as link map names (output in the css_players readout) to their respective
-workshop ID. If the config.ini file contains the line "UsesMatchLibrarian=true", the plugin will generate a database of last 
-round data when each round ends. The database will be stored in game/csgo/addons/counterstrikesharp/configs/plugins/MatchLibrarian
-for use with the MatchLibrarian plugin, which manages communicating match history with an external webpage for browsing purposes.
+In the config.ini (/steam/cs2/game/csgo/addons/counterstrikesharp/configs/plugins/ServerStats/config.ini), you must
+set the collection ID for the server if you want workshop IDs to show in the css_players output and the json database.
+A workshop.ini will be generated upon server startup that will read all of the vpk map files and associate them with
+their respective workshop IDs. You must have them all downloaded to your CS2 server before this will work.
+"UsesMatchLibrarian=true" means the plugin will generate a json database of last round data when each round ends. It
+will also store a kill feed, objective data, and chat history with both team and all chat differentiation.
+The database will be stored in game/csgo/addons/counterstrikesharp/configs/plugins/MatchLibrarian for use with the 
+MatchLibrarian plugin, which facilitates communicating match history with an external webpage for historical purposes.
