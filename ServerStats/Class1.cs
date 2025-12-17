@@ -16,6 +16,10 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.Utils; // Added for ChatColors
+
+// RESOLVE AMBIGUITY (What timer??? lol)
+using CsTimer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace ServerStats
 {
@@ -183,6 +187,8 @@ namespace ServerStats
         private bool _wasWarmup = false;
         private string _lastMap = "";
 
+        private CsTimer? _spectatorKickTimer = null;
+
         private string _steamApiKey = "";
         private const string WorkshopContentRelPath = "../bin/linuxsteamrt64/steamapps/workshop/content/730";
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
@@ -199,6 +205,9 @@ namespace ServerStats
             RegisterEventHandler<EventMapShutdown>(OnMapShutdown, HookMode.Post);
             RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd, HookMode.Post);
             RegisterEventHandler<EventRoundAnnounceMatchStart>(OnMatchRestart, HookMode.Post);
+
+            RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect, HookMode.Post);
+            RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam, HookMode.Post);
 
             RegisterEventHandler<EventBombPlanted>(OnBombPlanted, HookMode.Post);
             RegisterEventHandler<EventBombDefused>(OnBombDefused, HookMode.Post);
@@ -753,6 +762,116 @@ collection_id=";
             SaveMatchData();
             Console.WriteLine($"[ServerStats] Match Finished. Final data saved for ID: {_currentMatchId}");
             return HookResult.Continue;
+        }
+
+        private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+        {
+            var player = @event.Userid;
+
+            // Only check if a real human is disconnecting
+            if (player != null && !player.IsBot && !player.IsHLTV)
+            {
+                // Check if there are any OTHER humans left playing on a team (not spec)
+                var remainingActiveHumans = Utilities.GetPlayers().Count(p =>
+                    !p.IsBot &&
+                    !p.IsHLTV &&
+                    p.Slot != player.Slot &&
+                    (p.TeamNum == 2 || p.TeamNum == 3));
+
+                // If no active players remain, restart game immediately to end match json
+                if (remainingActiveHumans == 0)
+                {
+                    Console.WriteLine("Last active human left. Restarting game to reset match.");
+                    Server.ExecuteCommand("mp_restartgame 1");
+                }
+
+                // Trigger logic to check for lingering spectators
+                CheckAndHandlePlayerCounts(player.Slot);
+            }
+
+            return HookResult.Continue;
+        }
+
+        private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
+        {
+            // Delay check to next frame to ensure team switch is fully processed
+            Server.NextFrame(() => CheckAndHandlePlayerCounts());
+            return HookResult.Continue;
+        }
+
+        private void CheckAndHandlePlayerCounts(int? ignoreSlot = null)
+        {
+            var allPlayers = Utilities.GetPlayers();
+            int activeHumans = 0;
+            int specHumans = 0;
+
+            foreach (var p in allPlayers)
+            {
+                if (p == null || !p.IsValid || p.IsBot || p.IsHLTV) continue;
+                if (ignoreSlot.HasValue && p.Slot == ignoreSlot.Value) continue;
+
+                // TeamNum: 1 = Spec, 2 = T, 3 = CT
+                if (p.TeamNum == 2 || p.TeamNum == 3)
+                {
+                    activeHumans++;
+                }
+                else if (p.TeamNum == 1)
+                {
+                    specHumans++;
+                }
+            }
+
+            // No active players on teams, but spectators exist
+            if (activeHumans == 0 && specHumans > 0)
+            {
+                if (_spectatorKickTimer == null)
+                {
+                    // Red and All Caps
+                    Server.PrintToChatAll($"{ChatColors.Red}WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
+                    _spectatorKickTimer = AddTimer(30.0f, KickSpectatorsAndRestart);
+                }
+            }
+            // Active players exist, cancel any pending kick
+            else if (activeHumans > 0)
+            {
+                if (_spectatorKickTimer != null)
+                {
+                    _spectatorKickTimer.Kill();
+                    _spectatorKickTimer = null;
+                    Server.PrintToChatAll($"{ChatColors.Green}ACTIVE PLAYER JOINED. SPECTATOR KICK TIMER CANCELLED.");
+                }
+            }
+            // If everyone is gone (active=0, spec=0), ensure timer is killed (though restart handles it usually)
+            else if (activeHumans == 0 && specHumans == 0 && _spectatorKickTimer != null)
+            {
+                _spectatorKickTimer.Kill();
+                _spectatorKickTimer = null;
+            }
+        }
+
+        private void KickSpectatorsAndRestart()
+        {
+            _spectatorKickTimer = null;
+            var allPlayers = Utilities.GetPlayers();
+            bool kicked = false;
+
+            foreach (var p in allPlayers)
+            {
+                if (p != null && p.IsValid && !p.IsBot && !p.IsHLTV && p.TeamNum == 1)
+                {
+                    // Kick spectators
+                    Server.ExecuteCommand($"kickid {p.UserId} \"AFK Spectator\"");
+                    kicked = true;
+                }
+            }
+
+            if (kicked)
+            {
+                Console.WriteLine("[ServerStats] Kicked spectators due to inactivity.");
+            }
+
+            // Restart game after kicking
+            Server.ExecuteCommand("mp_restartgame 1");
         }
 
         private PlayerMatchData GetOrAddPlayer(CCSPlayerController player)
