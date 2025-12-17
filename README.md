@@ -11,3 +11,8 @@ their respective workshop IDs. You must have them all downloaded to your CS2 ser
 will also store a kill feed, objective data, and chat history with both team and all chat differentiation.
 The database will be stored in game/csgo/addons/counterstrikesharp/configs/plugins/MatchLibrarian for use with the 
 MatchLibrarian plugin, which facilitates communicating match history with an external webpage for historical purposes.
+
+Note:
+If a player(s) is in spectate, and nobody else is playing, the plugin will kick the player(s) in 30 seconds to prevent 
+a malformed match json in the event that bots are enabled. Also, if the last player in a match leaves the match, the 
+game will restart when a new player joins. This prevents match timelines that are too long.
