@@ -827,7 +827,7 @@ collection_id=";
                 if (_spectatorKickTimer == null)
                 {
                     // Red and All Caps
-                    Server.PrintToChatAll($"{ChatColors.Red}WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
+                    Server.PrintToChatAll($" {ChatColors.Red}WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
                     _spectatorKickTimer = AddTimer(30.0f, KickSpectatorsAndRestart);
                 }
             }
@@ -838,7 +838,7 @@ collection_id=";
                 {
                     _spectatorKickTimer.Kill();
                     _spectatorKickTimer = null;
-                    Server.PrintToChatAll($"{ChatColors.Green}ACTIVE PLAYER JOINED. SPECTATOR KICK TIMER CANCELLED.");
+                    Server.PrintToChatAll($" {ChatColors.Green}ACTIVE PLAYER JOINED. SPECTATOR KICK TIMER CANCELLED.");
                 }
             }
             // If everyone is gone (active=0, spec=0), ensure timer is killed (though restart handles it usually)
