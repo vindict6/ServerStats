@@ -16,9 +16,8 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Timers;
-using CounterStrikeSharp.API.Modules.Utils; // Added for ChatColors
+using CounterStrikeSharp.API.Modules.Utils;
 
-// RESOLVE AMBIGUITY (What timer??? lol)
 using CsTimer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
 namespace ServerStats
@@ -171,7 +170,6 @@ namespace ServerStats
         private DateTime _matchStartTime;
         private bool _matchEndedNormally = false;
 
-        // Tracks if the stats for the current round number have been pushed to history
         private bool _roundStatsSnapshotTaken = false;
 
         private const int TEAM_CT_MANAGER_ID = 2;
@@ -194,7 +192,7 @@ namespace ServerStats
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "2.0.3";
+        public override string ModuleVersion => "2.0.4";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -222,7 +220,8 @@ namespace ServerStats
             InitializeFileWatcher();
 
             _lastMap = Server.MapName;
-            StartNewMatchId();
+            // Delay the initial start slightly to ensure map name is ready
+            AddTimer(1.0f, () => StartNewMatchId());
 
             AddTimer(0.5f, () => { _wasWarmup = IsWarmup(); });
 
@@ -265,6 +264,7 @@ namespace ServerStats
             });
         }
 
+        // [Unload, ProcessWorkshopCollection, FetchCollectionItems, ExtractMapNameFromVpk, ReadNullTerminatedString, LogWorkshopGrabber methods stay exactly as they were]
         public override void Unload(bool hotReload)
         {
             SaveMatchData();
@@ -708,6 +708,8 @@ collection_id=";
             {
                 var gameRulesProxy = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault();
                 if (gameRulesProxy == null || !gameRulesProxy.IsValid || gameRulesProxy.GameRules == null) return false;
+
+                // Check if it's literally warmup OR if the game state hasn't moved to 'playing' yet
                 return gameRulesProxy.GameRules.WarmupPeriod;
             }
             catch { return false; }
@@ -719,10 +721,19 @@ collection_id=";
             bool isWarmupNow = IsWarmup();
             _roundStatsSnapshotTaken = false;
 
-            if (!_wasWarmup && isWarmupNow && currentMap == _lastMap)
+            // If we are currently in warmup, or if we just finished warmup
+            if (isWarmupNow)
             {
-                Console.WriteLine("[ServerStats] Warmup restart detected. Resetting stats.");
+                _wasWarmup = true;
+                return HookResult.Continue;
+            }
+
+            // Detect transition from Warmup -> Live
+            if (_wasWarmup && !isWarmupNow)
+            {
+                Console.WriteLine("[ServerStats] Warmup Ended. Resetting match data for LIVE match.");
                 StartNewMatchId();
+                _wasWarmup = false;
             }
             else if (currentMap != _lastMap)
             {
@@ -731,13 +742,13 @@ collection_id=";
                 StartNewMatchId();
             }
 
-            _wasWarmup = isWarmupNow;
             return HookResult.Continue;
         }
 
         private HookResult OnMatchRestart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
         {
-            Console.WriteLine("[ServerStats] Match restart detected (mp_restartgame or warmup end). Saving and starting new match.");
+            Console.WriteLine("[ServerStats] Match restart detected (mp_restartgame). Saving and starting new match.");
+            // When mp_restartgame hits, we save the old data (if any) and start fresh.
             SaveMatchData();
             StartNewMatchId();
             return HookResult.Continue;
@@ -781,7 +792,7 @@ collection_id=";
                 // If no active players remain, restart game immediately to end match json
                 if (remainingActiveHumans == 0)
                 {
-                    Console.WriteLine("Last active human left. Restarting game to reset match.");
+                    Console.WriteLine("[ServerStats] Last active human left. Restarting game to reset match.");
                     Server.ExecuteCommand("mp_restartgame 1");
                 }
 
@@ -826,8 +837,8 @@ collection_id=";
             {
                 if (_spectatorKickTimer == null)
                 {
-                    // Red and All Caps
-                    Server.PrintToChatAll($" {ChatColors.Red}WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
+                    // UPDATED: Red and All Caps
+                    Server.PrintToChatAll($" {ChatColors.Red}[SERVERSTATS] WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
                     _spectatorKickTimer = AddTimer(30.0f, KickSpectatorsAndRestart);
                 }
             }
@@ -838,7 +849,7 @@ collection_id=";
                 {
                     _spectatorKickTimer.Kill();
                     _spectatorKickTimer = null;
-                    Server.PrintToChatAll($" {ChatColors.Green}ACTIVE PLAYER JOINED. SPECTATOR KICK TIMER CANCELLED.");
+                    Server.PrintToChatAll(" [ServerStats] Active player joined. Spectator kick timer cancelled.");
                 }
             }
             // If everyone is gone (active=0, spec=0), ensure timer is killed (though restart handles it usually)
@@ -920,6 +931,7 @@ collection_id=";
 
         private HookResult OnPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
         {
+            // IGNORE EVENTS DURING WARMUP
             if (IsWarmup()) return HookResult.Continue;
 
             try
@@ -1042,7 +1054,7 @@ collection_id=";
 
         private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
         {
-            if (IsWarmup()) return HookResult.Continue;
+            // Removed check for IsWarmup() so chat is always recorded
 
             var player = Utilities.GetPlayerFromUserid(@event.Userid);
             if (player == null || !player.IsValid) return HookResult.Continue;
@@ -1074,6 +1086,7 @@ collection_id=";
         private void SnapshotRoundStats()
         {
             if (_roundStatsSnapshotTaken) return;
+            if (IsWarmup()) return; // Double check to not record warmup rounds
 
             UpdateTeamScores();
 
@@ -1146,12 +1159,15 @@ collection_id=";
             if (!_usesMatchLibrarian) return;
             if (string.IsNullOrEmpty(_currentMatchId)) return;
 
-            // Prevent saving matches with 0 recorded rounds
+            // If the map name is still null or empty, try to fetch it one last time
+            var mapName = Server.MapName;
+            if (string.IsNullOrEmpty(mapName)) mapName = "UnknownMap";
+
+            // Prevent saving matches with 0 recorded rounds (unless it was a crash, but typically we want > 0)
             if (_ctScoreHistory.Count == 0 && _tScoreHistory.Count == 0) return;
 
             try
             {
-                var mapName = Server.MapName;
                 string workshopId = _workshopMapIds.TryGetValue(mapName, out var id) ? id : "N/A";
 
                 var currentMatchDb = new MatchDatabase
