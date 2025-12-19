@@ -192,7 +192,7 @@ namespace ServerStats
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "2.0.4";
+        public override string ModuleVersion => "2.0.5";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -264,7 +264,6 @@ namespace ServerStats
             });
         }
 
-        // [Unload, ProcessWorkshopCollection, FetchCollectionItems, ExtractMapNameFromVpk, ReadNullTerminatedString, LogWorkshopGrabber methods stay exactly as they were]
         public override void Unload(bool hotReload)
         {
             SaveMatchData();
@@ -538,7 +537,7 @@ namespace ServerStats
         {
             _currentMatchId = DateTime.UtcNow.ToString("yyyy-MM-dd-HH-mm-ss");
             _matchStartTime = DateTime.UtcNow;
-            _matchEndedNormally = false;
+            _matchEndedNormally = false; // Reset the ended flag for the new match
 
             _playerStats.Clear();
             _globalKillFeed.Clear();
@@ -709,7 +708,6 @@ collection_id=";
                 var gameRulesProxy = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault();
                 if (gameRulesProxy == null || !gameRulesProxy.IsValid || gameRulesProxy.GameRules == null) return false;
 
-                // Check if it's literally warmup OR if the game state hasn't moved to 'playing' yet
                 return gameRulesProxy.GameRules.WarmupPeriod;
             }
             catch { return false; }
@@ -720,6 +718,15 @@ collection_id=";
             string currentMap = Server.MapName;
             bool isWarmupNow = IsWarmup();
             _roundStatsSnapshotTaken = false;
+
+            // FIX: Check if the previous match finished normally. If so, force a reset regardless of map/warmup state.
+            if (_matchEndedNormally)
+            {
+                Console.WriteLine("[ServerStats] Previous match ended (Win Panel). Resetting match data for NEXT match.");
+                StartNewMatchId();
+                _wasWarmup = isWarmupNow; // Sync warmup state
+                return HookResult.Continue;
+            }
 
             // If we are currently in warmup, or if we just finished warmup
             if (isWarmupNow)
@@ -779,24 +786,20 @@ collection_id=";
         {
             var player = @event.Userid;
 
-            // Only check if a real human is disconnecting
             if (player != null && !player.IsBot && !player.IsHLTV)
             {
-                // Check if there are any OTHER humans left playing on a team (not spec)
                 var remainingActiveHumans = Utilities.GetPlayers().Count(p =>
                     !p.IsBot &&
                     !p.IsHLTV &&
                     p.Slot != player.Slot &&
                     (p.TeamNum == 2 || p.TeamNum == 3));
 
-                // If no active players remain, restart game immediately to end match json
                 if (remainingActiveHumans == 0)
                 {
                     Console.WriteLine("[ServerStats] Last active human left. Restarting game to reset match.");
                     Server.ExecuteCommand("mp_restartgame 1");
                 }
 
-                // Trigger logic to check for lingering spectators
                 CheckAndHandlePlayerCounts(player.Slot);
             }
 
@@ -805,7 +808,6 @@ collection_id=";
 
         private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
         {
-            // Delay check to next frame to ensure team switch is fully processed
             Server.NextFrame(() => CheckAndHandlePlayerCounts());
             return HookResult.Continue;
         }
@@ -821,7 +823,6 @@ collection_id=";
                 if (p == null || !p.IsValid || p.IsBot || p.IsHLTV) continue;
                 if (ignoreSlot.HasValue && p.Slot == ignoreSlot.Value) continue;
 
-                // TeamNum: 1 = Spec, 2 = T, 3 = CT
                 if (p.TeamNum == 2 || p.TeamNum == 3)
                 {
                     activeHumans++;
@@ -832,17 +833,14 @@ collection_id=";
                 }
             }
 
-            // No active players on teams, but spectators exist
             if (activeHumans == 0 && specHumans > 0)
             {
                 if (_spectatorKickTimer == null)
                 {
-                    // UPDATED: Red and All Caps
                     Server.PrintToChatAll($" {ChatColors.Red}[SERVERSTATS] WARNING: NO ACTIVE PLAYERS. SPECTATORS WILL BE KICKED IN 30 SECONDS.");
                     _spectatorKickTimer = AddTimer(30.0f, KickSpectatorsAndRestart);
                 }
             }
-            // Active players exist, cancel any pending kick
             else if (activeHumans > 0)
             {
                 if (_spectatorKickTimer != null)
@@ -852,7 +850,6 @@ collection_id=";
                     Server.PrintToChatAll(" [ServerStats] Active player joined. Spectator kick timer cancelled.");
                 }
             }
-            // If everyone is gone (active=0, spec=0), ensure timer is killed (though restart handles it usually)
             else if (activeHumans == 0 && specHumans == 0 && _spectatorKickTimer != null)
             {
                 _spectatorKickTimer.Kill();
@@ -870,7 +867,6 @@ collection_id=";
             {
                 if (p != null && p.IsValid && !p.IsBot && !p.IsHLTV && p.TeamNum == 1)
                 {
-                    // Kick spectators
                     Server.ExecuteCommand($"kickid {p.UserId} \"AFK Spectator\"");
                     kicked = true;
                 }
@@ -881,7 +877,6 @@ collection_id=";
                 Console.WriteLine("[ServerStats] Kicked spectators due to inactivity.");
             }
 
-            // Restart game after kicking
             Server.ExecuteCommand("mp_restartgame 1");
         }
 
@@ -931,7 +926,6 @@ collection_id=";
 
         private HookResult OnPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
         {
-            // IGNORE EVENTS DURING WARMUP
             if (IsWarmup()) return HookResult.Continue;
 
             try
@@ -1054,8 +1048,6 @@ collection_id=";
 
         private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
         {
-            // Removed check for IsWarmup() so chat is always recorded
-
             var player = Utilities.GetPlayerFromUserid(@event.Userid);
             if (player == null || !player.IsValid) return HookResult.Continue;
 
@@ -1086,14 +1078,13 @@ collection_id=";
         private void SnapshotRoundStats()
         {
             if (_roundStatsSnapshotTaken) return;
-            if (IsWarmup()) return; // Double check to not record warmup rounds
+            if (IsWarmup()) return;
 
             UpdateTeamScores();
 
             _ctScoreHistory.Add(_ctWins);
             _tScoreHistory.Add(_tWins);
 
-            // FORCE update: ensure all currently connected players (including passive bots) are in the system
             foreach (var p in Utilities.GetPlayers())
             {
                 if (p != null && p.IsValid && p.Connected == PlayerConnectedState.PlayerConnected)
@@ -1106,7 +1097,6 @@ collection_id=";
             {
                 var data = kvp.Value;
 
-                // Handle bots (SteamID 0) properly
                 var playerEntity = Utilities.GetPlayers().FirstOrDefault(p =>
                 {
                     if (p == null || !p.IsValid) return false;
@@ -1157,13 +1147,15 @@ collection_id=";
         private void SaveMatchData()
         {
             if (!_usesMatchLibrarian) return;
+
+            // FIX: Do not save JSON files if the match is still in Warmup mode.
+            if (IsWarmup()) return;
+
             if (string.IsNullOrEmpty(_currentMatchId)) return;
 
-            // If the map name is still null or empty, try to fetch it one last time
             var mapName = Server.MapName;
             if (string.IsNullOrEmpty(mapName)) mapName = "UnknownMap";
 
-            // Prevent saving matches with 0 recorded rounds (unless it was a crash, but typically we want > 0)
             if (_ctScoreHistory.Count == 0 && _tScoreHistory.Count == 0) return;
 
             try
