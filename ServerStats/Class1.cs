@@ -25,6 +25,14 @@ namespace ServerStats
     [MinimumApiVersion(80)]
     public class PlayerStatsEventTracker : BasePlugin
     {
+        public class DebugLogEntry
+        {
+            public string Timestamp { get; set; } = "";
+            public string Reason { get; set; } = "";
+            public string PreviousMatchId { get; set; } = "";
+            public string NewMatchId { get; set; } = "";
+            public string CurrentMap { get; set; } = "";
+        }
         public class MatchDatabase
         {
             public string MatchID { get; set; } = "";
@@ -155,25 +163,22 @@ namespace ServerStats
             }
         }
 
-        private readonly ConcurrentDictionary<ulong, PlayerMatchData> _playerStats = new();
+        // Live Data Container - Optimized to be a single persistent object
+        private MatchDatabase _matchData = new();
+        // Fast lookup to find player objects inside _matchData.Players
+        private readonly ConcurrentDictionary<ulong, PlayerMatchData> _playerLookup = new();
 
-        private List<CombatLog> _globalKillFeed = new();
-        private List<ObjectiveLog> _globalEventFeed = new();
-        private List<ChatLog> _globalChatFeed = new();
-        private List<int> _ctScoreHistory = new();
-        private List<int> _tScoreHistory = new();
+        private int _currentRound = 1;
 
+        // Caching scores locally to check for 0-0 reset
         private int _ctWins = 0;
         private int _tWins = 0;
-        private int _currentRound = 1;
-        private string _currentMatchId = "";
-        private DateTime _matchStartTime;
-        private bool _matchEndedNormally = false;
 
         private bool _roundStatsSnapshotTaken = false;
+        private bool _matchEndedNormally = false;
 
-        private const int TEAM_CT_MANAGER_ID = 2;
-        private const int TEAM_T_MANAGER_ID = 3;
+        private const int TEAM_CT_MANAGER_ID = 3;
+        private const int TEAM_T_MANAGER_ID = 2;
 
         private readonly Dictionary<string, string> _workshopMapIds = new();
         private string _loadedCollectionId = "N/A";
@@ -182,8 +187,6 @@ namespace ServerStats
         private bool _usesMatchLibrarian = true;
         private FileSystemWatcher? _fileWatcher;
         private DateTime _lastReloadTime = DateTime.MinValue;
-        private bool _wasWarmup = false;
-        private string _lastMap = "";
 
         private CsTimer? _spectatorKickTimer = null;
 
@@ -192,7 +195,7 @@ namespace ServerStats
         private const string WorkshopGrabLogRelPath = "addons/counterstrikesharp/configs/plugins/ServerStats/workshopgrab.log";
 
         public override string ModuleName => "ServerStats";
-        public override string ModuleVersion => "2.0.5";
+        public override string ModuleVersion => "2.1.0";
         public override string ModuleAuthor => "VinSix";
 
         public override void Load(bool hotReload)
@@ -202,7 +205,9 @@ namespace ServerStats
             RegisterEventHandler<EventRoundPrestart>(OnRoundPrestart, HookMode.Post);
             RegisterEventHandler<EventMapShutdown>(OnMapShutdown, HookMode.Post);
             RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd, HookMode.Post);
-            RegisterEventHandler<EventRoundAnnounceMatchStart>(OnMatchRestart, HookMode.Post);
+
+            // Removed OnMatchRestart, relying solely on Score 0:0 check in RoundPrestart
+            // RegisterEventHandler<EventRoundAnnounceMatchStart>(OnMatchRestart, HookMode.Post);
 
             RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect, HookMode.Post);
             RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam, HookMode.Post);
@@ -219,11 +224,9 @@ namespace ServerStats
             LoadWorkshopIni();
             InitializeFileWatcher();
 
-            _lastMap = Server.MapName;
-            // Delay the initial start slightly to ensure map name is ready
-            AddTimer(1.0f, () => StartNewMatchId());
-
-            AddTimer(0.5f, () => { _wasWarmup = IsWarmup(); });
+            // REMOVED: Initializing match ID on load.
+            // We now strictly wait for OnRoundPrestart to detect a 0-0 score before creating a Match ID.
+            // This prevents duplicate match creation on map load and ensures restarts on the same map are handled correctly.
 
             AddCommand("css_players", "Print tracked player stats (humans and bots)", (caller, cmdInfo) =>
             {
@@ -266,8 +269,6 @@ namespace ServerStats
 
         public override void Unload(bool hotReload)
         {
-            SaveMatchData();
-
             if (_fileWatcher != null)
             {
                 _fileWatcher.EnableRaisingEvents = false;
@@ -435,6 +436,55 @@ namespace ServerStats
             return ids;
         }
 
+        private void LogMatchCreationDebug(string reason, string newId)
+        {
+            try
+            {
+                string debugFilePath = Path.Combine(MatchLibrarianDir, "debug.json");
+                List<DebugLogEntry> logEntries;
+
+                if (File.Exists(debugFilePath))
+                {
+                    string existingJson = File.ReadAllText(debugFilePath);
+                    try
+                    {
+                        logEntries = JsonSerializer.Deserialize<List<DebugLogEntry>>(existingJson) ?? new List<DebugLogEntry>();
+                    }
+                    catch
+                    {
+                        logEntries = new List<DebugLogEntry>();
+                    }
+                }
+                else
+                {
+                    logEntries = new List<DebugLogEntry>();
+                }
+
+                var entry = new DebugLogEntry
+                {
+                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                    Reason = reason,
+                    PreviousMatchId = _matchData.MatchID,
+                    NewMatchId = newId,
+                    CurrentMap = Server.MapName
+                };
+
+                logEntries.Add(entry);
+
+                if (logEntries.Count > 50)
+                {
+                    logEntries = logEntries.Skip(logEntries.Count - 50).ToList();
+                }
+
+                var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+                File.WriteAllText(debugFilePath, JsonSerializer.Serialize(logEntries, jsonOptions));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ServerStats] Failed to write debug.json: {ex.Message}");
+            }
+        }
+
         private string? ExtractMapNameFromVpk(string vpkPath, string mapId, string logDir)
         {
             try
@@ -533,24 +583,25 @@ namespace ServerStats
             catch { }
         }
 
-        private void StartNewMatchId()
+        private void StartNewMatchId(string reason)
         {
-            _currentMatchId = DateTime.UtcNow.ToString("yyyy-MM-dd-HH-mm-ss");
-            _matchStartTime = DateTime.UtcNow;
-            _matchEndedNormally = false; // Reset the ended flag for the new match
+            // Reset main variables
+            string newId = DateTime.UtcNow.ToString("yyyy-MM-dd-HH-mm-ss");
+            LogMatchCreationDebug(reason, newId);
 
-            _playerStats.Clear();
-            _globalKillFeed.Clear();
-            _globalEventFeed.Clear();
-            _globalChatFeed.Clear();
-            _ctScoreHistory.Clear();
-            _tScoreHistory.Clear();
+            // Create a fresh MatchDatabase object.
+            _matchData = new MatchDatabase();
+            _matchData.MatchID = newId;
+            _matchData.StartTime = DateTime.UtcNow;
 
-            _ctWins = 0;
-            _tWins = 0;
+            // Clear lookups as the old objects are gone
+            _playerLookup.Clear();
+
             _currentRound = 1;
+            _matchEndedNormally = false;
             _roundStatsSnapshotTaken = false;
-            Console.WriteLine($"[ServerStats] Started new Match ID: {_currentMatchId}");
+
+            Console.WriteLine($"[ServerStats] Started new Match ID: {_matchData.MatchID} ({reason})");
         }
 
         private void InitializeFileWatcher()
@@ -715,70 +766,54 @@ collection_id=";
 
         private HookResult OnRoundPrestart(EventRoundPrestart @event, GameEventInfo info)
         {
-            string currentMap = Server.MapName;
-            bool isWarmupNow = IsWarmup();
+            bool isWarmup = IsWarmup();
+            _matchData.IsWarmup = isWarmup;
             _roundStatsSnapshotTaken = false;
 
-            // FIX: Check if the previous match finished normally. If so, force a reset regardless of map/warmup state.
-            if (_matchEndedNormally)
+            UpdateTeamScores();
+
+            // ONLY start a new match ID if the score is 0-0 and it is NOT warmup.
+            // This covers map changes (starts at 0-0), restartgame (resets to 0-0), etc.
+            if (!isWarmup && _ctWins == 0 && _tWins == 0)
             {
-                Console.WriteLine("[ServerStats] Previous match ended (Win Panel). Resetting match data for NEXT match.");
-                StartNewMatchId();
-                _wasWarmup = isWarmupNow; // Sync warmup state
-                return HookResult.Continue;
+                // Logic to prevent re-triggering if we just started
+                // If total rounds recorded is > 0, we definitely need a reset.
+                // If total rounds is 0, we might have just reset. 
+                // However, "StartNewMatchId" is cheap if the data is already empty.
+                // A simple way to verify if we *just* reset is checking if the list is empty.
+                // But we want to guarantee a new ID on 0-0.
+                // To avoid looping in the same round, we rely on the fact RoundPrestart fires once per round.
+
+                // If we have data from a previous match in memory, or if this is a fresh start event.
+                // We simply check if we have any round history. If we do, this 0-0 is definitely a new match.
+                // If we don't have round history, we can still reset to be safe and ensure the timestamp is fresh.
+                StartNewMatchId("Score Reset 0-0");
             }
 
-            // If we are currently in warmup, or if we just finished warmup
-            if (isWarmupNow)
-            {
-                _wasWarmup = true;
-                return HookResult.Continue;
-            }
-
-            // Detect transition from Warmup -> Live
-            if (_wasWarmup && !isWarmupNow)
-            {
-                Console.WriteLine("[ServerStats] Warmup Ended. Resetting match data for LIVE match.");
-                StartNewMatchId();
-                _wasWarmup = false;
-            }
-            else if (currentMap != _lastMap)
-            {
-                Console.WriteLine($"[ServerStats] Map changed from {_lastMap} to {currentMap}. New Match.");
-                _lastMap = currentMap;
-                StartNewMatchId();
-            }
-
-            return HookResult.Continue;
-        }
-
-        private HookResult OnMatchRestart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
-        {
-            Console.WriteLine("[ServerStats] Match restart detected (mp_restartgame). Saving and starting new match.");
-            // When mp_restartgame hits, we save the old data (if any) and start fresh.
-            SaveMatchData();
-            StartNewMatchId();
             return HookResult.Continue;
         }
 
         private HookResult OnMapShutdown(EventMapShutdown @event, GameEventInfo info)
         {
-            SaveMatchData();
+            // Optional: Save on shutdown to prevent total data loss if server crashes,
+            // even though prompt said "only... on each round end".
+            // Generally safer to keep this, but respecting the prompt's focus on logic.
+            // I will leave it out to strictly follow "Only save updates... on each round end".
             return HookResult.Continue;
         }
 
         private HookResult OnMatchEnd(EventCsWinPanelMatch @event, GameEventInfo info)
         {
             _matchEndedNormally = true;
+            _matchData.MatchComplete = true;
 
-            // Ensure the final round stats are captured if not already done by OnRoundEnded
             if (!_roundStatsSnapshotTaken)
             {
                 SnapshotRoundStats();
             }
 
             SaveMatchData();
-            Console.WriteLine($"[ServerStats] Match Finished. Final data saved for ID: {_currentMatchId}");
+            Console.WriteLine($"[ServerStats] Match Finished. Final data saved for ID: {_matchData.MatchID}");
             return HookResult.Continue;
         }
 
@@ -887,7 +922,7 @@ collection_id=";
             ulong steamId = player.SteamID;
             if (steamId == 0) steamId = (ulong)player.Handle.ToInt64();
 
-            return _playerStats.GetOrAdd(steamId, _ => {
+            return _playerLookup.GetOrAdd(steamId, _ => {
                 var newData = new PlayerMatchData
                 {
                     SteamID = steamId,
@@ -896,6 +931,7 @@ collection_id=";
                     CurrentTeam = player.TeamNum
                 };
 
+                // Backfill history if player joins late
                 for (int i = 0; i < _currentRound - 1; i++)
                 {
                     newData.TeamHistory.Add(0);
@@ -907,6 +943,12 @@ collection_id=";
                     newData.ScoreHistory.Add(0);
                     newData.AliveHistory.Add(false);
                     newData.InventoryHistory.Add("");
+                }
+
+                // CRITICAL: Add to the main list directly
+                lock (_matchData.Players)
+                {
+                    _matchData.Players.Add(newData);
                 }
 
                 return newData;
@@ -945,7 +987,7 @@ collection_id=";
                     string attackerName = (attacker != null && attacker.IsValid) ? (attacker.PlayerName ?? "Unknown") : "World/Self";
                     ulong attackerSteamID = (attacker != null && attacker.IsValid) ? attacker.SteamID : 0;
 
-                    _globalKillFeed.Add(new CombatLog
+                    _matchData.KillFeed.Add(new CombatLog
                     {
                         Round = _currentRound,
                         Type = "Death",
@@ -974,7 +1016,7 @@ collection_id=";
                     string victimName = (victim != null && victim.IsValid) ? (victim.PlayerName ?? "Unknown") : "Unknown";
                     ulong victimSteamID = (victim != null && victim.IsValid) ? victim.SteamID : 0;
 
-                    _globalKillFeed.Add(new CombatLog
+                    _matchData.KillFeed.Add(new CombatLog
                     {
                         Round = _currentRound,
                         Type = "Kill",
@@ -1006,7 +1048,7 @@ collection_id=";
             if (player == null || !player.IsValid || IsWarmup()) return;
 
             var data = GetOrAddPlayer(player);
-            _globalEventFeed.Add(new ObjectiveLog
+            _matchData.EventFeed.Add(new ObjectiveLog
             {
                 Round = _currentRound,
                 PlayerName = data.Name,
@@ -1051,7 +1093,7 @@ collection_id=";
             var player = Utilities.GetPlayerFromUserid(@event.Userid);
             if (player == null || !player.IsValid) return HookResult.Continue;
 
-            _globalChatFeed.Add(new ChatLog
+            _matchData.ChatFeed.Add(new ChatLog
             {
                 Round = _currentRound,
                 PlayerName = player.PlayerName ?? "Unknown",
@@ -1082,9 +1124,15 @@ collection_id=";
 
             UpdateTeamScores();
 
-            _ctScoreHistory.Add(_ctWins);
-            _tScoreHistory.Add(_tWins);
+            // Direct modification of _matchData properties
+            _matchData.CTWins = _ctWins;
+            _matchData.TWins = _tWins;
+            _matchData.TotalRounds = _ctWins + _tWins;
 
+            _matchData.CTScoreHistory.Add(_ctWins);
+            _matchData.TScoreHistory.Add(_tWins);
+
+            // Ensure all connected players are tracked
             foreach (var p in Utilities.GetPlayers())
             {
                 if (p != null && p.IsValid && p.Connected == PlayerConnectedState.PlayerConnected)
@@ -1093,10 +1141,9 @@ collection_id=";
                 }
             }
 
-            foreach (var kvp in _playerStats)
+            // Update stats for all tracked players
+            foreach (var data in _matchData.Players)
             {
-                var data = kvp.Value;
-
                 var playerEntity = Utilities.GetPlayers().FirstOrDefault(p =>
                 {
                     if (p == null || !p.IsValid) return false;
@@ -1147,41 +1194,24 @@ collection_id=";
         private void SaveMatchData()
         {
             if (!_usesMatchLibrarian) return;
-
-            // FIX: Do not save JSON files if the match is still in Warmup mode.
             if (IsWarmup()) return;
+            if (string.IsNullOrEmpty(_matchData.MatchID)) return;
 
-            if (string.IsNullOrEmpty(_currentMatchId)) return;
-
-            var mapName = Server.MapName;
-            if (string.IsNullOrEmpty(mapName)) mapName = "UnknownMap";
-
-            if (_ctScoreHistory.Count == 0 && _tScoreHistory.Count == 0) return;
+            // Only save if we actually have round history or if match just ended
+            if (_matchData.CTScoreHistory.Count == 0 && _matchData.TScoreHistory.Count == 0 && !_matchEndedNormally) return;
 
             try
             {
+                var mapName = Server.MapName;
+                if (string.IsNullOrEmpty(mapName)) mapName = "UnknownMap";
+
                 string workshopId = _workshopMapIds.TryGetValue(mapName, out var id) ? id : "N/A";
 
-                var currentMatchDb = new MatchDatabase
-                {
-                    MatchID = _currentMatchId,
-                    MatchComplete = _matchEndedNormally,
-                    MapName = mapName,
-                    WorkshopID = workshopId,
-                    CollectionID = _loadedCollectionId,
-                    StartTime = _matchStartTime,
-                    LastUpdated = DateTime.UtcNow,
-                    CTWins = _ctWins,
-                    TWins = _tWins,
-                    TotalRounds = _ctWins + _tWins,
-                    CTScoreHistory = _ctScoreHistory,
-                    TScoreHistory = _tScoreHistory,
-                    IsWarmup = IsWarmup(),
-                    Players = _playerStats.Values.ToList(),
-                    KillFeed = _globalKillFeed,
-                    EventFeed = _globalEventFeed,
-                    ChatFeed = _globalChatFeed
-                };
+                // Update header info fields
+                _matchData.MapName = mapName;
+                _matchData.WorkshopID = workshopId;
+                _matchData.CollectionID = _loadedCollectionId;
+                _matchData.LastUpdated = DateTime.UtcNow;
 
                 var now = DateTime.UtcNow;
                 var yearFolder = now.ToString("yyyy");
@@ -1192,11 +1222,13 @@ collection_id=";
 
                 if (!Directory.Exists(dailyDirectory)) Directory.CreateDirectory(dailyDirectory);
 
-                var matchFileName = $"{_currentMatchId}.json";
+                var matchFileName = $"{_matchData.MatchID}.json";
                 var fullFilePath = Path.Combine(dailyDirectory, matchFileName);
 
                 var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(fullFilePath, JsonSerializer.Serialize(currentMatchDb, jsonOptions));
+
+                // Optimization: Directly serialize the persistent object
+                File.WriteAllText(fullFilePath, JsonSerializer.Serialize(_matchData, jsonOptions));
             }
             catch (Exception ex)
             {
@@ -1233,7 +1265,7 @@ collection_id=";
             string workshopId = _workshopMapIds.TryGetValue(mapName, out var id) ? id : "N/A";
             string recordingStatus = _usesMatchLibrarian ? "ON" : "OFF";
 
-            cmd.ReplyToCommand($"--- Status: Map: {mapName} | ID: {_currentMatchId} | CollectionID: {_loadedCollectionId} | WorkshopID: {workshopId} | Warmup: {(isWarmup ? "Yes" : "No")} | DB: {recordingStatus} ---");
+            cmd.ReplyToCommand($"--- Status: Map: {mapName} | ID: {_matchData.MatchID} | CollectionID: {_loadedCollectionId} | WorkshopID: {workshopId} | Warmup: {(isWarmup ? "Yes" : "No")} | DB: {recordingStatus} ---");
             cmd.ReplyToCommand($"--- Humans: {humans.Count}, Bots: {bots.Count} | T Wins: {_tWins}, CT Wins: {_ctWins} ---");
 
             if (humans.Any())
