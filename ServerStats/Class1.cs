@@ -105,8 +105,10 @@ namespace ServerStats
             [JsonConverter(typeof(InlineListConverter<string>))]
             public List<string> InventoryHistory { get; set; } = new();
 
+
             [JsonIgnore] public int CurrentTeam { get; set; }
             [JsonIgnore] public int CurrentKills { get; set; }
+            [JsonIgnore] public int CurrentRoundKills { get; set; }
             [JsonIgnore] public int CurrentDeaths { get; set; }
             [JsonIgnore] public int CurrentAssists { get; set; }
             [JsonIgnore] public int CurrentZeusKills { get; set; }
@@ -189,6 +191,7 @@ namespace ServerStats
         private DateTime _lastReloadTime = DateTime.MinValue;
 
         private bool _announceZeusLeader = false;
+        private bool _announceAces = false;
         private int _highestZeusKills = 0;
 
         private CsTimer? _spectatorKickTimer = null;
@@ -664,6 +667,8 @@ namespace ServerStats
 UsesMatchLibrarian=true
 // Announce when a player takes the lead in Zeus kills (true/false)
 announce_zeus_leader=true
+// Announce when a player gets an Ace (5 kills in a round) (true/false)
+announce_aces=true
 // Insert your Steam Web API Key below
 api_key=
 // Insert your Workshop Collection ID below
@@ -698,6 +703,10 @@ collection_id=";
                     else if (key.Equals("announce_zeus_leader", StringComparison.OrdinalIgnoreCase))
                     {
                         if (bool.TryParse(value, out bool result)) _announceZeusLeader = result;
+                    }
+                    else if (key.Equals("announce_aces", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (bool.TryParse(value, out bool result)) _announceAces = result;
                     }
                     else if (key.Equals("collection_id", StringComparison.OrdinalIgnoreCase))
                     {
@@ -788,6 +797,11 @@ collection_id=";
             bool isWarmup = IsWarmup();
             _matchData.IsWarmup = isWarmup;
             _roundStatsSnapshotTaken = false;
+
+            foreach (var kvp in _playerLookup)
+            {
+                kvp.Value.CurrentRoundKills = 0;
+            }
 
             UpdateTeamScores();
 
@@ -1026,6 +1040,12 @@ collection_id=";
                 {
                     var data = GetOrAddPlayer(attacker);
                     data.CurrentKills++;
+
+                    data.CurrentRoundKills++;
+                    if (_announceAces && data.CurrentRoundKills == 5)
+                    {
+                        Server.PrintToChatAll($" {ChatColors.Yellow}{data.Name} just got an Ace!");
+                    }
 
                     if (weaponName.Contains("taser", StringComparison.OrdinalIgnoreCase))
                     {
