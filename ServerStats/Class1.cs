@@ -188,6 +188,9 @@ namespace ServerStats
         private FileSystemWatcher? _fileWatcher;
         private DateTime _lastReloadTime = DateTime.MinValue;
 
+        private bool _announceZeusLeader = false;
+        private int _highestZeusKills = 0;
+
         private CsTimer? _spectatorKickTimer = null;
 
         private string _steamApiKey = "";
@@ -230,7 +233,14 @@ namespace ServerStats
 
             AddCommand("css_players", "Print tracked player stats (humans and bots)", (caller, cmdInfo) =>
             {
-                PrintPlayerStats(caller, cmdInfo);
+                if (caller != null)
+                {
+                    cmdInfo.ReplyToCommand("Command disabled for players.");
+                }
+                else
+                {
+                    PrintPlayerStats(caller, cmdInfo);
+                }
             });
 
             AddCommand("css_workshoplog", "Show the log of loading workshop.ini", (caller, cmdInfo) =>
@@ -594,6 +604,8 @@ namespace ServerStats
             _matchData.MatchID = newId;
             _matchData.StartTime = DateTime.UtcNow;
 
+            _highestZeusKills = 0;
+
             // Clear lookups as the old objects are gone
             _playerLookup.Clear();
 
@@ -650,6 +662,8 @@ namespace ServerStats
                 {
                     string defaultConfig = @"// ServerStats General Configuration
 UsesMatchLibrarian=true
+// Announce when a player takes the lead in Zeus kills (true/false)
+announce_zeus_leader=true
 // Insert your Steam Web API Key below
 api_key=
 // Insert your Workshop Collection ID below
@@ -657,6 +671,7 @@ collection_id=";
                     File.WriteAllText(GeneralConfigPath, defaultConfig);
                     _usesMatchLibrarian = true;
                     _loadedCollectionId = "N/A";
+                    _announceZeusLeader = true;
                     Console.WriteLine("[ServerStats] Created default config.ini.");
                     return;
                 }
@@ -679,6 +694,10 @@ collection_id=";
                     else if (key.Equals("api_key", StringComparison.OrdinalIgnoreCase))
                     {
                         _steamApiKey = value;
+                    }
+                    else if (key.Equals("announce_zeus_leader", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (bool.TryParse(value, out bool result)) _announceZeusLeader = result;
                     }
                     else if (key.Equals("collection_id", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1011,6 +1030,15 @@ collection_id=";
                     if (weaponName.Contains("taser", StringComparison.OrdinalIgnoreCase))
                     {
                         data.CurrentZeusKills++;
+                        if (data.CurrentZeusKills > _highestZeusKills)
+                        {
+                            _highestZeusKills = data.CurrentZeusKills;
+
+                            if (_announceZeusLeader)
+                            {
+                                Server.PrintToChatAll($" {ChatColors.Blue}New Zeus Leader: {data.Name}");
+                            }
+                        }
                     }
 
                     string victimName = (victim != null && victim.IsValid) ? (victim.PlayerName ?? "Unknown") : "Unknown";
