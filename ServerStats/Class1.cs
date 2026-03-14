@@ -225,7 +225,8 @@ namespace ServerStats
             RegisterEventHandler<EventHostageFollows>(OnHostagePickup, HookMode.Post);
             RegisterEventHandler<EventHostageRescued>(OnHostageRescued, HookMode.Post);
 
-            RegisterEventHandler<EventPlayerChat>(OnPlayerChat, HookMode.Post);
+            AddCommandListener("say", OnPlayerChatCommand);
+            AddCommandListener("say_team", OnPlayerChatCommand);
 
             LoadConfigIni();
             LoadWorkshopIni();
@@ -1188,18 +1189,22 @@ collection_id=";
             return HookResult.Continue;
         }
 
-        private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
+        private HookResult OnPlayerChatCommand(CCSPlayerController? player, CommandInfo info)
         {
-            var player = Utilities.GetPlayerFromUserid(@event.Userid);
             if (player == null || !player.IsValid) return HookResult.Continue;
+
+            string message = info.GetArg(1);
+            if (string.IsNullOrEmpty(message)) return HookResult.Continue;
+
+            bool isTeamChat = info.GetArg(0).Equals("say_team", StringComparison.OrdinalIgnoreCase);
 
             _matchData.ChatFeed.Add(new ChatLog
             {
                 Round = _currentRound,
                 PlayerName = player.PlayerName ?? "Unknown",
                 PlayerSteamID = player.SteamID,
-                Message = @event.Text ?? "",
-                TeamChat = @event.Teamonly,
+                Message = message,
+                TeamChat = isTeamChat,
                 Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
             });
 
