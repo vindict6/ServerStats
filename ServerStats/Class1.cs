@@ -1047,7 +1047,8 @@ collection_id=";
                         Server.PrintToChatAll($" {ChatColors.Yellow}{data.Name} just got an Ace!");
                     }
 
-                    if (weaponName.Contains("taser", StringComparison.OrdinalIgnoreCase))
+                    bool victimIsBot = victim != null && victim.IsValid && victim.IsBot;
+                    if (weaponName.Contains("taser", StringComparison.OrdinalIgnoreCase) && !victimIsBot)
                     {
                         data.CurrentZeusKills++;
                         if (data.CurrentZeusKills > _highestZeusKills)
