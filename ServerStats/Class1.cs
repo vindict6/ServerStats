@@ -195,7 +195,6 @@ namespace ServerStats
         private int _highestZeusKills = 0;
 
         private CsTimer? _spectatorKickTimer = null;
-        private CsTimer? _noHumansRestartTimer = null;
 
         private string _steamApiKey = "";
         private const string WorkshopContentRelPath = "../bin/linuxsteamrt64/steamapps/workshop/content/730";
@@ -225,8 +224,7 @@ namespace ServerStats
             RegisterEventHandler<EventHostageFollows>(OnHostagePickup, HookMode.Post);
             RegisterEventHandler<EventHostageRescued>(OnHostageRescued, HookMode.Post);
 
-            AddCommandListener("say", OnPlayerChatCommand);
-            AddCommandListener("say_team", OnPlayerChatCommand);
+            RegisterEventHandler<EventPlayerChat>(OnPlayerChat, HookMode.Post);
 
             LoadConfigIni();
             LoadWorkshopIni();
@@ -284,18 +282,6 @@ namespace ServerStats
 
         public override void Unload(bool hotReload)
         {
-            if (_noHumansRestartTimer != null)
-            {
-                _noHumansRestartTimer.Kill();
-                _noHumansRestartTimer = null;
-            }
-
-            if (_spectatorKickTimer != null)
-            {
-                _spectatorKickTimer.Kill();
-                _spectatorKickTimer = null;
-            }
-
             if (_fileWatcher != null)
             {
                 _fileWatcher.EnableRaisingEvents = false;
@@ -876,10 +862,10 @@ collection_id=";
                     p.Slot != player.Slot &&
                     (p.TeamNum == 2 || p.TeamNum == 3));
 
-                if (remainingActiveHumans == 0 && _noHumansRestartTimer == null)
+                if (remainingActiveHumans == 0)
                 {
-                    Console.WriteLine("[ServerStats] No active humans detected. Scheduling restart in 30 seconds.");
-                    _noHumansRestartTimer = AddTimer(30.0f, OnNoHumansRestartTimer);
+                    Console.WriteLine("[ServerStats] Last active human left. Restarting game to reset match.");
+                    Server.ExecuteCommand("mp_restartgame 1");
                 }
 
                 CheckAndHandlePlayerCounts(player.Slot);
@@ -931,50 +917,11 @@ collection_id=";
                     _spectatorKickTimer = null;
                     Server.PrintToChatAll(" [ServerStats] Active player joined. Spectator kick timer cancelled.");
                 }
-                CancelNoHumansRestartTimer();
             }
             else if (activeHumans == 0 && specHumans == 0 && _spectatorKickTimer != null)
             {
                 _spectatorKickTimer.Kill();
                 _spectatorKickTimer = null;
-            }
-        }
-
-        private void CancelNoHumansRestartTimer()
-        {
-            if (_noHumansRestartTimer != null)
-            {
-                _noHumansRestartTimer.Kill();
-                _noHumansRestartTimer = null;
-                Console.WriteLine("[ServerStats] No-humans restart timer cancelled. Active players present.");
-            }
-        }
-
-        private void OnNoHumansRestartTimer()
-        {
-            _noHumansRestartTimer = null;
-
-            try
-            {
-                var activeHumans = Utilities.GetPlayers().Count(p =>
-                    p != null &&
-                    p.IsValid &&
-                    !p.IsBot &&
-                    !p.IsHLTV &&
-                    (p.TeamNum == 2 || p.TeamNum == 3));
-
-                if (activeHumans > 0)
-                {
-                    Console.WriteLine("[ServerStats] No-humans restart aborted. Active players found.");
-                    return;
-                }
-
-                Console.WriteLine("[ServerStats] Last active human left. Restarting game to reset match.");
-                Server.ExecuteCommand("mp_restartgame 1");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ServerStats] No-humans restart timer error (possibly mid-map-transition): {ex.Message}");
             }
         }
 
@@ -1189,22 +1136,18 @@ collection_id=";
             return HookResult.Continue;
         }
 
-        private HookResult OnPlayerChatCommand(CCSPlayerController? player, CommandInfo info)
+        private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
         {
+            var player = Utilities.GetPlayerFromUserid(@event.Userid);
             if (player == null || !player.IsValid) return HookResult.Continue;
-
-            string message = info.GetArg(1);
-            if (string.IsNullOrEmpty(message)) return HookResult.Continue;
-
-            bool isTeamChat = info.GetArg(0).Equals("say_team", StringComparison.OrdinalIgnoreCase);
 
             _matchData.ChatFeed.Add(new ChatLog
             {
                 Round = _currentRound,
                 PlayerName = player.PlayerName ?? "Unknown",
                 PlayerSteamID = player.SteamID,
-                Message = message,
-                TeamChat = isTeamChat,
+                Message = @event.Text ?? "",
+                TeamChat = @event.Teamonly,
                 Timestamp = DateTime.UtcNow.ToString("HH:mm:ss")
             });
 
